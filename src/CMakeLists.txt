@@ -54,7 +54,6 @@ add_library(llama
 set_target_properties(llama PROPERTIES
     VERSION ${LLAMA_VERSION_BASE}
     SOVERSION ${LLAMA_VERSION_MAJOR}
-    MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
     UNITY_BUILD ON
     UNITY_BUILD_BATCH_SIZE 16
 )

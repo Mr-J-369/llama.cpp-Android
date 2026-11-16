@@ -5,17 +5,8 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#   define WIN32_LEAN_AND_MEAN
-#   ifndef NOMINMAX
-#       define NOMINMAX
-#   endif
-#   include <windows.h>
-#   include <winevt.h>
-#else
-#   include <dlfcn.h>
-#   include <unistd.h>
-#endif
+#include <dlfcn.h>
+#include <unistd.h>
 
 #pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
 #pragma clang diagnostic ignored "-Wmissing-prototypes"
@@ -183,12 +174,6 @@ AEEResult dspqueue_read(dspqueue_t               queue,
                         uint32_t *               message_length,
                         uint8_t *                message,
                         uint32_t                 timeout_us) {
-#ifdef _WIN32
-    if (timeout_us == 0) {
-        return dspqueue_read_noblock_pfn(queue, flags, max_buffers, num_buffers, buffers, max_message_length,
-                                     message_length, message);
-    }
-#endif
     return dspqueue_read_pfn(queue, flags, max_buffers, num_buffers, buffers, max_message_length, message_length,
                              message, timeout_us);
 }
@@ -224,127 +209,12 @@ HTPDRV_API int remote_system_request(system_req_payload * req) {
     return remote_system_request_pfn(req);
 }
 
-#ifdef _WIN32
-
-static std::string wstr_to_str(std::wstring_view wstr) {
-    std::string result;
-    if (wstr.empty()) {
-        return result;
-    }
-    auto bytes_needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                            wstr.data(), (int) wstr.size(),
-                                            nullptr, 0, nullptr, nullptr);
-    if (bytes_needed == 0) {
-        GGML_LOG_ERROR("ggml-hex: WideCharToMultiByte failed. Error %lu\n", GetLastError());
-        throw std::runtime_error("Invalid wstring input");
-    }
-
-    result.resize(bytes_needed, '\0');
-    int bytes_written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                            wstr.data(), (int) wstr.size(),
-                                            result.data(), bytes_needed,
-                                            nullptr, nullptr);
-    if (bytes_written == 0) {
-        GGML_LOG_ERROR("ggml-hex: WideCharToMultiByte failed. Error %lu\n", GetLastError());
-        throw std::runtime_error("Wstring conversion failed");
-    }
-    return result;
-}
-
-static std::string get_driver_path() {
-    std::wstring serviceName = L"qcnspmcdm";
-    std::string result;
-
-    // Get a handle to the SCM database.
-    SC_HANDLE schSCManager = OpenSCManagerW(NULL, NULL, STANDARD_RIGHTS_READ);
-    if (nullptr == schSCManager) {
-        GGML_LOG_ERROR("ggml-hex: Failed to open SCManager. Error: %lu\n", GetLastError());
-        return result;
-    }
-
-    // Get a handle to the service.
-    SC_HANDLE schService = OpenServiceW(schSCManager,           // SCM database
-                                        serviceName.c_str(),    // name of service
-                                        SERVICE_QUERY_CONFIG);  // need query config access
-
-    if (nullptr == schService) {
-        GGML_LOG_ERROR("ggml-hex: Failed to open qcnspmcdm service. Error: %lu\n", GetLastError());
-        CloseServiceHandle(schSCManager);
-        return result;
-    }
-
-    // Store the size of buffer used as an output.
-    DWORD bufferSize;
-    if (!QueryServiceConfigW(schService, NULL, 0, &bufferSize) &&
-        (GetLastError() != ERROR_INSUFFICIENT_BUFFER)) {
-        GGML_LOG_ERROR("ggml-hex: Failed to query service config. Error: %lu\n", GetLastError());
-        CloseServiceHandle(schService);
-        CloseServiceHandle(schSCManager);
-        return result;
-    }
-    // Get the configuration of the service.
-    LPQUERY_SERVICE_CONFIGW serviceConfig =
-        static_cast<LPQUERY_SERVICE_CONFIGW>(LocalAlloc(LMEM_FIXED, bufferSize));
-    if (!QueryServiceConfigW(schService, serviceConfig, bufferSize, &bufferSize)) {
-        fprintf(stderr, "ggml-hex: Failed to query service config. Error: %lu\n", GetLastError());
-        LocalFree(serviceConfig);
-        CloseServiceHandle(schService);
-        CloseServiceHandle(schSCManager);
-        return result;
-    }
-
-    // Read the driver file path get its parent directory
-    std::wstring driverPath = std::wstring(serviceConfig->lpBinaryPathName);
-    driverPath = driverPath.substr(0, driverPath.find_last_of(L"\\"));
-
-    // Clean up resources
-    LocalFree(serviceConfig);
-    CloseServiceHandle(schService);
-    CloseServiceHandle(schSCManager);
-
-    // Driver path would contain invalid path string, like:
-    // \SystemRoot\System32\DriverStore\FileRepository\qcadsprpc8280.inf_arm64_c2b9460c9a072f37
-    // "\SystemRoot" should be replace with a correct one (e.g. C:\Windows)
-    const std::wstring systemRootPlaceholder = L"\\SystemRoot";
-    if (0 != driverPath.compare(0, systemRootPlaceholder.length(), systemRootPlaceholder)) {
-        GGML_LOG_ERROR("ggml-hex: String pattern not found in driver path.\n");
-        return result;
-    }
-
-    // Replace \SystemRoot with an absolute path from system ENV windir
-    const std::wstring systemRootEnv = L"windir";
-
-    // Query the number of wide characters this variable requires
-    DWORD numWords = GetEnvironmentVariableW(systemRootEnv.c_str(), NULL, 0);
-    if (numWords == 0) {
-        GGML_LOG_ERROR("ggml-hex: Failed get systemRoot environment variable\n");
-        return result;
-    }
-
-    // Query the actual system root name from environment variable
-    std::vector<wchar_t> systemRoot(numWords + 1);
-    numWords = GetEnvironmentVariableW(systemRootEnv.c_str(), systemRoot.data(), numWords + 1);
-    if (numWords == 0) {
-        GGML_LOG_ERROR("ggml-hex: Failed to read windir environment variable\n");
-        return result;
-    }
-    driverPath.replace(0, systemRootPlaceholder.length(), std::wstring(systemRoot.data()));
-
-    return wstr_to_str(driverPath);
-}
-
-#endif
-
 using dl_handle_ptr = std::unique_ptr<dl_handle, dl_handle_deleter>;
 
 int htpdrv_init() {
     static dl_handle_ptr lib_cdsp_rpc_handle = nullptr;
     static bool initialized = false;
-#ifdef _WIN32
-    std::string drv_path = get_driver_path() + "\\" + "libcdsprpc.dll";
-#else
     std::string drv_path = "libcdsprpc.so";
-#endif
     if (initialized) {
         GGML_LOG_INFO("ggml-hex: Driver already loaded\n");
         return AEE_SUCCESS;
@@ -435,7 +305,6 @@ int htpdrv_get_arch(int domain, int * arch) {
 
 // Directory of the HTP library as a path with a trailing slash, or empty if it cannot be resolved.
 // Checks GGML_HEXAGON_LIBHTP_DIR first, then the module directory and ../lib.
-// On Windows, non-ASCII directories or paths with spaces use the 8.3 short name.
 std::string htp_lib_dir() {
     namespace fs = std::filesystem;
 
@@ -450,26 +319,6 @@ std::string htp_lib_dir() {
         }
     }
 
-#ifdef _WIN32
-    HMODULE hm = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR) &htp_lib_dir, &hm)) {
-        std::wstring buf(32768, L'\0');
-        DWORD n = GetModuleFileNameW(hm, buf.data(), (DWORD) buf.size());
-        if (n > 0 && n < buf.size()) {
-            buf.resize(n);
-            std::error_code ec;
-            fs::path mod_path = fs::canonical(buf, ec);
-            if (ec) {
-                mod_path = fs::absolute(buf, ec);
-            }
-            const fs::path mod_dir = mod_path.parent_path();
-            candidates.push_back(mod_dir);
-            candidates.push_back(mod_dir / "lib");
-            candidates.push_back(mod_dir / ".." / "lib");
-        }
-    }
-#elif defined(__linux__) || defined(__ANDROID__)
     Dl_info info;
     if (dladdr((void *) &htp_lib_dir, &info) && info.dli_fname) {
         std::error_code ec;
@@ -482,7 +331,6 @@ std::string htp_lib_dir() {
         candidates.push_back(mod_dir / "lib");
         candidates.push_back(mod_dir / ".." / "lib");
     }
-#endif
 
     for (size_t i = 0; i < candidates.size(); ++i) {
         const fs::path & d = candidates[i];
@@ -516,42 +364,11 @@ std::string htp_lib_dir() {
             abs_d = fs::absolute(d, ec_canon);
         }
 
-#ifdef _WIN32
-        std::wstring dir = abs_d.wstring();
-        auto is_ascii = [](const std::wstring & s) {
-            return std::all_of(s.begin(), s.end(), [](wchar_t c) { return c < 0x80; });
-        };
-        auto has_spaces = [](const std::wstring & s) {
-            return std::any_of(s.begin(), s.end(), [](wchar_t c) { return c == L' '; });
-        };
-
-        if (!is_ascii(dir) || has_spaces(dir)) {
-            DWORD m = GetShortPathNameW(dir.c_str(), nullptr, 0);
-            if (m > 0) {
-                std::wstring sp(m, L'\0');
-                DWORD res = GetShortPathNameW(dir.c_str(), sp.data(), (DWORD) sp.size());
-                if (res > 0 && res < sp.size()) {
-                    sp.resize(res);
-                    if (is_ascii(sp)) {
-                        dir = sp;
-                    }
-                }
-            }
-            if (!is_ascii(dir)) {
-                continue;
-            }
-        }
-        if (dir.back() != L'\\' && dir.back() != L'/') {
-            dir += L'\\';
-        }
-        return std::string(dir.begin(), dir.end());
-#else
         std::string dir = abs_d.string();
         if (dir.back() != '/') {
             dir += '/';
         }
         return dir;
-#endif
     }
 
     return {};

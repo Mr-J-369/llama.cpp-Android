@@ -79,7 +79,6 @@ option(GGML_SANITIZE_ADDRESS       "ggml: enable address sanitizer"             
 option(GGML_SANITIZE_UNDEFINED     "ggml: enable undefined sanitizer"                     OFF)
 
 # CPU options
-option(GGML_CPU_HBM                "ggml: use memkind for CPU HBM"                        OFF)
 option(GGML_CPU_REPACK             "ggml: use runtime weight conversion of Q4_0 to Q4_X_X" ON)
 option(GGML_CPU_KLEIDIAI           "ggml: use KleidiAI optimized kernels if applicable"   OFF)
 option(GGML_CPU_ALL_VARIANTS       "ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)" OFF)
@@ -91,16 +90,6 @@ option(GGML_CPU                    "ggml: enable CPU backend"                   
 option(GGML_SCHED_NO_REALLOC       "ggml: disallow reallocations in ggml-alloc (for debugging)" OFF)
 
 option(GGML_OPENMP                 "ggml: use OpenMP"                                     ON)
-
-option(GGML_VULKAN                          "ggml: use Vulkan"                                OFF)
-option(GGML_VULKAN_CHECK_RESULTS            "ggml: run Vulkan op checks"                      OFF)
-option(GGML_VULKAN_DEBUG                    "ggml: enable Vulkan debug output"                OFF)
-option(GGML_VULKAN_MEMORY_DEBUG             "ggml: enable Vulkan memory debug output"         OFF)
-option(GGML_VULKAN_SHADER_DEBUG_INFO        "ggml: enable Vulkan shader debug info"           OFF)
-option(GGML_VULKAN_VALIDATE                 "ggml: enable Vulkan validation"                  OFF)
-option(GGML_VULKAN_RUN_TESTS                "ggml: run Vulkan tests"                          OFF)
-set   (GGML_VULKAN_SPIRV_INCLUDE_DIR "" CACHE PATH "ggml: override the SPIRV-Headers include directory")
-set   (GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "" CACHE FILEPATH "ggml: toolchain file for vulkan-shaders-gen")
 
 option(GGML_OPENCL                          "ggml: use OpenCL"                                OFF)
 option(GGML_OPENCL_PROFILING                "ggml: use OpenCL profiling (increases overhead)" OFF)
@@ -147,7 +136,6 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-cpp.h
     include/ggml-opt.h
     include/ggml-opencl.h
-    include/ggml-vulkan.h
     include/ggml-hexagon.h
     include/gguf.h)
 

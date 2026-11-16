@@ -1,6 +1,3 @@
-#define _CRT_SECURE_NO_DEPRECATE // Disables "unsafe" warnings on Windows
-#define _USE_MATH_DEFINES // For M_PI on MSVC
-
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "traits.h"
@@ -16,11 +13,7 @@
 #include "common.h"
 #include "tiled/tiled.h"
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-#include <malloc.h> // using malloc.h with MSC/MINGW
-#elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
 #include <alloca.h>
-#endif
 
 #include <assert.h>
 #include <errno.h>
@@ -35,9 +28,6 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <signal.h>
-#if defined(__gnu_linux__)
-#include <syscall.h>
-#endif
 
 #ifdef GGML_USE_OPENMP
 #include <omp.h>
@@ -83,106 +73,9 @@ struct ggml_arm_arch_features_type {
 } ggml_arm_arch_features = { 0 };
 #endif
 
-#if defined(__riscv)
-struct ggml_riscv_arch_features_type {
-    int rvv_vlen;
-} ggml_riscv_arch_features = { 0 };
-#endif
-
-#if defined(_WIN32)
-
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-    #define NOMINMAX
-#endif
-#include <windows.h>
-
-#if defined(_MSC_VER) && !defined(__clang__)
-#define GGML_CACHE_ALIGN __declspec(align(GGML_CACHE_LINE))
-
-typedef volatile LONG atomic_int;
-typedef atomic_int atomic_bool;
-typedef atomic_int atomic_flag;
-
-#define ATOMIC_FLAG_INIT 0
-
-typedef enum {
-    memory_order_relaxed,
-    memory_order_consume,
-    memory_order_acquire,
-    memory_order_release,
-    memory_order_acq_rel,
-    memory_order_seq_cst
-} memory_order;
-
-static void atomic_store(atomic_int * ptr, LONG val) {
-    InterlockedExchange(ptr, val);
-}
-static void atomic_store_explicit(atomic_int * ptr, LONG val, memory_order mo) {
-    // TODO: add support for explicit memory order
-    InterlockedExchange(ptr, val);
-}
-static LONG atomic_load(atomic_int * ptr) {
-    return InterlockedCompareExchange(ptr, 0, 0);
-}
-static LONG atomic_load_explicit(atomic_int * ptr, memory_order mo) {
-    // TODO: add support for explicit memory order
-    return InterlockedCompareExchange(ptr, 0, 0);
-}
-static LONG atomic_fetch_add(atomic_int * ptr, LONG inc) {
-    return InterlockedExchangeAdd(ptr, inc);
-}
-static LONG atomic_fetch_add_explicit(atomic_int * ptr, LONG inc, memory_order mo) {
-    // TODO: add support for explicit memory order
-    return InterlockedExchangeAdd(ptr, inc);
-}
-static atomic_bool atomic_flag_test_and_set(atomic_flag * ptr) {
-    return InterlockedExchange(ptr, 1);
-}
-static void atomic_flag_clear(atomic_flag * ptr) {
-    InterlockedExchange(ptr, 0);
-}
-static void atomic_thread_fence(memory_order mo) {
-    MemoryBarrier();
-}
-#else // clang
-#include <stdatomic.h>
-#endif
-
-typedef HANDLE pthread_t;
-
-typedef DWORD thread_ret_t;
-static int pthread_create(pthread_t * out, void * unused, thread_ret_t(*func)(void *), void * arg) {
-    (void) unused;
-    HANDLE handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) func, arg, 0, NULL);
-    if (handle == NULL)
-    {
-        return EAGAIN;
-    }
-
-    *out = handle;
-    return 0;
-}
-
-static int pthread_join(pthread_t thread, void * unused) {
-    (void) unused;
-    int ret = (int) WaitForSingleObject(thread, INFINITE);
-    CloseHandle(thread);
-    return ret;
-}
-
-static int sched_yield (void) {
-    Sleep (0);
-    return 0;
-}
-#else
-
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sched.h>
-#if defined(__FreeBSD__)
-#include <pthread_np.h>
-#endif
 
 typedef void * thread_ret_t;
 
@@ -190,18 +83,10 @@ typedef void * thread_ret_t;
 #include <sys/stat.h>
 #include <unistd.h>
 
-#endif
-
 typedef pthread_t ggml_thread_t;
 
 #define GGML_THREADPOOL_N_THREADS_MASK (0xffffU)
 #define GGML_THREADPOOL_N_THREADS_BITS (16)
-
-#if defined(__APPLE__)
-#include <unistd.h>
-#include <mach/mach.h>
-#include <TargetConditionals.h>
-#endif
 
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
@@ -421,29 +306,6 @@ const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type
 //
 
 typedef pthread_t          ggml_thread_t;
-
-#if defined(_WIN32)
-
-typedef CONDITION_VARIABLE ggml_cond_t;
-typedef SRWLOCK            ggml_mutex_t;
-
-#define ggml_mutex_init(m)   InitializeSRWLock(m)
-#define ggml_mutex_destroy(m)
-#define ggml_mutex_lock(m)   AcquireSRWLockExclusive(m)
-#define ggml_mutex_unlock(m) ReleaseSRWLockExclusive(m)
-#define ggml_mutex_lock_shared(m)   AcquireSRWLockShared(m)
-#define ggml_mutex_unlock_shared(m) ReleaseSRWLockShared(m)
-
-#define ggml_cond_init(c)    InitializeConditionVariable(c)
-#define ggml_cond_destroy(c)
-#define ggml_cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, CONDITION_VARIABLE_LOCKMODE_SHARED)
-#define ggml_cond_broadcast(c) WakeAllConditionVariable(c)
-
-#define ggml_thread_create pthread_create
-#define ggml_thread_join   pthread_join
-
-#else
-
 typedef pthread_cond_t     ggml_cond_t;
 typedef pthread_mutex_t    ggml_mutex_t;
 
@@ -456,11 +318,7 @@ typedef pthread_mutex_t    ggml_mutex_t;
 
 #define ggml_lock_init(x)    UNUSED(x)
 #define ggml_lock_destroy(x) UNUSED(x)
-#if defined(__x86_64__) || (defined(_MSC_VER) && defined(_M_AMD64) && !defined(_M_ARM64EC))
-#define ggml_lock_lock(x)    _mm_pause()
-#else
 #define ggml_lock_lock(x)    UNUSED(x)
-#endif
 #define ggml_lock_unlock(x)  UNUSED(x)
 
 #define GGML_LOCK_INITIALIZER 0
@@ -471,8 +329,6 @@ typedef pthread_mutex_t    ggml_mutex_t;
 
 #define ggml_thread_create pthread_create
 #define ggml_thread_join   pthread_join
-
-#endif
 
 // Threadpool def
 struct ggml_threadpool {
@@ -518,57 +374,9 @@ struct ggml_compute_state {
 static inline void ggml_thread_cpu_relax(void) {
     __asm__ volatile("yield" ::: "memory");
 }
-#elif defined(__x86_64__)
-static inline void ggml_thread_cpu_relax(void) {
-    _mm_pause();
-}
-#elif defined(__riscv)
-static inline void ggml_thread_cpu_relax(void) {
-    #ifdef __riscv_zihintpause
-        __asm__ __volatile__ ("pause");
-    #else
-        /* Encoding of the pause instruction */
-        __asm__ __volatile__ (".4byte 0x100000F");
-    #endif
-}
 #else
 static inline void ggml_thread_cpu_relax(void) {;}
 #endif
-
-//
-// NUMA support
-//
-
-#define GGML_NUMA_MAX_NODES 8
-#define GGML_NUMA_MAX_CPUS 512
-
-struct ggml_numa_node {
-    uint32_t cpus[GGML_NUMA_MAX_CPUS]; // hardware threads on this node
-    uint32_t n_cpus;
-};
-
-struct ggml_numa_nodes {
-    enum ggml_numa_strategy numa_strategy;
-    struct ggml_numa_node nodes[GGML_NUMA_MAX_NODES];
-    uint32_t n_nodes;
-    uint32_t total_cpus; // hardware threads on system
-    uint32_t current_node; // node on which main process is execting
-#if defined(__gnu_linux__)
-    cpu_set_t cpuset; // cpuset from numactl
-#else
-    uint32_t cpuset; // no NUMA support outside of Linux at this time. Use a portable datatype
-#endif
-};
-
-//
-// ggml state
-//
-
-struct ggml_state {
-    struct ggml_numa_nodes numa;
-};
-
-static struct ggml_state g_state = {0};
 
 void ggml_barrier(struct ggml_threadpool * tp) {
     int n_threads = atomic_load_explicit(&tp->n_graph, memory_order_relaxed) & GGML_THREADPOOL_N_THREADS_MASK;
@@ -616,111 +424,12 @@ int ggml_threadpool_chunk_add(struct ggml_threadpool * tp, int value) {
     return atomic_fetch_add_explicit(&tp->current_chunk, value, memory_order_relaxed);
 }
 
-#if defined(__gnu_linux__)
-static cpu_set_t ggml_get_numa_affinity(void) {
-    cpu_set_t cpuset;
-    pthread_t thread;
-    thread = pthread_self();
-    CPU_ZERO(&cpuset);
-    pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-    return cpuset;
-}
-#else
-static uint32_t ggml_get_numa_affinity(void) {
-    return 0; // no NUMA support
-}
-#endif
-
 void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
-    if (g_state.numa.n_nodes > 0) {
-        fprintf(stderr, "ggml_numa_init: NUMA already initialized\n");
-
-        return;
-    }
-
-#if defined(__gnu_linux__)
-    struct stat st;
-    char path[256];
-    int rv;
-
-    // set numa scheme
-    g_state.numa.numa_strategy = numa_flag;
-
-    GGML_PRINT_DEBUG("numa strategy %u\n",g_state.numa.numa_strategy);
-
-    g_state.numa.cpuset = ggml_get_numa_affinity();
-
-    // enumerate nodes
-    while (g_state.numa.n_nodes < GGML_NUMA_MAX_NODES) {
-        rv = snprintf(path, sizeof(path), "/sys/devices/system/node/node%u", g_state.numa.n_nodes);
-        GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
-        if (stat(path, &st) != 0) { break; }
-        ++g_state.numa.n_nodes;
-    }
-
-    // enumerate CPUs
-    while (g_state.numa.total_cpus < GGML_NUMA_MAX_CPUS) {
-        rv = snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u", g_state.numa.total_cpus);
-        GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
-        if (stat(path, &st) != 0) { break; }
-        ++g_state.numa.total_cpus;
-    }
-
-    GGML_PRINT_DEBUG("found %u numa nodes, %u CPUs\n", g_state.numa.n_nodes, g_state.numa.total_cpus);
-
-    // figure out which node we're on
-    uint current_cpu;
-    int getcpu_ret = 0;
-#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ > 33) || defined(__COSMOPOLITAN__)
-    getcpu_ret = getcpu(&current_cpu, &g_state.numa.current_node);
-#else
-    // old glibc doesn't have a wrapper for this call. Fall back on direct syscall
-#   if !defined(SYS_getcpu) && defined(SYS_get_cpu)
-#       define SYS_getcpu SYS_get_cpu // some older glibc versions use this name
-#   endif
-    getcpu_ret = syscall(SYS_getcpu, &current_cpu, &g_state.numa.current_node);
-#endif
-
-    if (g_state.numa.n_nodes < 1 || g_state.numa.total_cpus < 1 || getcpu_ret != 0) {
-        g_state.numa.n_nodes = 0;
-        return;
-    }
-
-    GGML_PRINT_DEBUG("found our process on numa node %u, CPU %u\n", g_state.numa.current_node, current_cpu);
-
-    for (uint32_t n = 0; n < g_state.numa.n_nodes; ++n) {
-        struct ggml_numa_node * node = &g_state.numa.nodes[n];
-        GGML_PRINT_DEBUG("CPUs on node %u:", n);
-        node->n_cpus = 0;
-        for (uint32_t c = 0; c < g_state.numa.total_cpus; ++c) {
-            rv = snprintf(path, sizeof(path), "/sys/devices/system/node/node%u/cpu%u", n, c);
-            GGML_ASSERT(rv > 0 && (unsigned)rv < sizeof(path));
-            if (stat(path, &st) == 0) {
-                node->cpus[node->n_cpus++] = c;
-                GGML_PRINT_DEBUG(" %u", c);
-            }
-        }
-        GGML_PRINT_DEBUG("\n");
-    }
-
-    if (ggml_is_numa()) {
-        FILE *fptr = fopen("/proc/sys/kernel/numa_balancing", "r");
-        if (fptr != NULL) {
-            char buf[42];
-            if (fgets(buf, sizeof(buf), fptr) && strncmp(buf, "0\n", sizeof(buf)) != 0) {
-                GGML_LOG_WARN("/proc/sys/kernel/numa_balancing is enabled, this has been observed to impair performance\n");
-            }
-            fclose(fptr);
-        }
-    }
-#else
     UNUSED(numa_flag);
-    // TODO
-#endif
 }
 
 bool ggml_is_numa(void) {
-    return g_state.numa.n_nodes > 1;
+    return false;
 }
 
 #if defined(__ARM_ARCH)
@@ -733,15 +442,6 @@ static void ggml_init_arm_arch_features(void) {
 static void ggml_init_arm_arch_features(void) {}
 #endif
 #endif // __ARM_ARCH
-
-#if defined(__riscv) && defined(__riscv_v)
-#include <riscv_vector.h>
-static void ggml_init_riscv_arch_features(void) {
-    ggml_riscv_arch_features.rvv_vlen = __riscv_vlenb();
-}
-#else
-static void ggml_init_riscv_arch_features(void) {}
-#endif
 
 struct ggml_tensor * ggml_new_i32(struct ggml_context * ctx, int32_t value) {
     GGML_ASSERT(!ggml_get_no_alloc(ctx));
@@ -2120,79 +1820,8 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
     }
 }
 
-// Android's libc implementation "bionic" does not support setting affinity
-#if defined(__gnu_linux__)
-static void set_numa_thread_affinity(int thread_n) {
-    if (!ggml_is_numa()) {
-        return;
-    }
-
-    int node_num;
-    int rv;
-    size_t setsize = CPU_ALLOC_SIZE(g_state.numa.total_cpus);
-
-    switch(g_state.numa.numa_strategy) {
-        case GGML_NUMA_STRATEGY_DISTRIBUTE:
-            // run thread on node_num thread_n / (threads per node)
-            node_num = thread_n % g_state.numa.n_nodes;
-            break;
-        case GGML_NUMA_STRATEGY_ISOLATE:
-            // run thread on current_node
-            node_num = g_state.numa.current_node;
-            break;
-        case GGML_NUMA_STRATEGY_NUMACTL:
-            // use the cpuset that numactl gave us
-            rv = pthread_setaffinity_np(pthread_self(), setsize, &g_state.numa.cpuset);
-            if (rv) {
-                fprintf(stderr, "warning: pthread_setaffinity_np() failed: %s\n",strerror(rv));
-            }
-            return;
-        default:
-            return;
-    }
-
-    struct ggml_numa_node * node = &g_state.numa.nodes[node_num];
-
-    cpu_set_t * cpus = CPU_ALLOC(g_state.numa.total_cpus);
-    CPU_ZERO_S(setsize, cpus);
-    for (size_t i = 0; i < node->n_cpus; ++i) {
-        CPU_SET_S(node->cpus[i], setsize, cpus);
-    }
-
-    rv = pthread_setaffinity_np(pthread_self(), setsize, cpus);
-    if (rv) {
-            fprintf(stderr, "warning: pthread_setaffinity_np() failed: %s\n", strerror(rv));
-    }
-
-    CPU_FREE(cpus);
-}
-
-static void clear_numa_thread_affinity(void) {
-    if (!ggml_is_numa()) {
-        return;
-    }
-
-    size_t setsize = CPU_ALLOC_SIZE(g_state.numa.total_cpus);
-
-    cpu_set_t * cpus = CPU_ALLOC(g_state.numa.total_cpus);
-    CPU_ZERO_S(setsize, cpus);
-    for (unsigned i = 0; i < g_state.numa.total_cpus; ++i) {
-        CPU_SET_S(i, setsize, cpus);
-    }
-
-    int rv = pthread_setaffinity_np(pthread_self(), setsize, cpus);
-    if (rv) {
-        fprintf(stderr, "warning: pthread_setaffinity_np() failed: %s\n", strerror(rv));
-    }
-
-    CPU_FREE(cpus);
-}
-#else
-// TODO: Windows etc.
-// (the linux implementation may also work on BSD, someone should test)
-static void set_numa_thread_affinity(int thread_n) { UNUSED(thread_n);  }
+static void set_numa_thread_affinity(int thread_n) { UNUSED(thread_n); }
 static void clear_numa_thread_affinity(void) {}
-#endif
 
 static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
     int n_tasks = 0;
@@ -2466,127 +2095,6 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
 
 static thread_ret_t ggml_graph_compute_secondary_thread(void* data);
 
-#if defined(_WIN32)
-#include "windows.h"
-
-// TODO: support > 64 CPUs
-static bool ggml_thread_apply_affinity(bool * mask) {
-    HANDLE    h = GetCurrentThread();
-    uint64_t  bitmask = 0ULL;
-
-    assert(GGML_MAX_N_THREADS >= 64);
-
-    for (int32_t i = 0; i < 8; i++) {
-        int32_t idx = i * 8;
-        uint8_t val = 0;
-        val |= mask[idx + 0] << 0;
-        val |= mask[idx + 1] << 1;
-        val |= mask[idx + 2] << 2;
-        val |= mask[idx + 3] << 3;
-        val |= mask[idx + 4] << 4;
-        val |= mask[idx + 5] << 5;
-        val |= mask[idx + 6] << 6;
-        val |= mask[idx + 7] << 7;
-        bitmask |= (uint64_t)val << idx;
-    }
-
-    for (int32_t i = 64; i < GGML_MAX_N_THREADS; i++) {
-        if (mask[i]) {
-            fprintf(stderr, "warn: setting thread-affinity for > 64 CPUs isn't supported on windows!\n");
-            break;
-        }
-    }
-
-    DWORD_PTR m = (DWORD_PTR)bitmask;
-
-    m = SetThreadAffinityMask(h, m);
-
-    return m != 0;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    // Note that on Windows the Process Priority Class must be updated in order to set Thread priority.
-    // This is up to the applications.
-    DWORD p = THREAD_PRIORITY_NORMAL;
-    switch (prio) {
-        case GGML_SCHED_PRIO_LOW:      p = THREAD_PRIORITY_BELOW_NORMAL;  break;
-        case GGML_SCHED_PRIO_NORMAL:   p = THREAD_PRIORITY_NORMAL;        break;
-        case GGML_SCHED_PRIO_MEDIUM:   p = THREAD_PRIORITY_ABOVE_NORMAL;  break;
-        case GGML_SCHED_PRIO_HIGH:     p = THREAD_PRIORITY_HIGHEST;       break;
-        case GGML_SCHED_PRIO_REALTIME: p = THREAD_PRIORITY_TIME_CRITICAL; break;
-    }
-
-    if (prio != GGML_SCHED_PRIO_LOW) {
-        // Tell Windows that this thread should not be throttled (needs its own CPU core).
-        // Newer Windows 11 versions aggressively park (offline) CPU cores and often place
-        // all our threads onto the first 4 cores which results in terrible performance with
-        // n_threads > 4
-        #if _WIN32_WINNT >= 0x0602
-        THREAD_POWER_THROTTLING_STATE t;
-        ZeroMemory(&t, sizeof(t));
-        t.Version     = THREAD_POWER_THROTTLING_CURRENT_VERSION;
-        t.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
-        t.StateMask   = 0;
-
-        if (!SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &t, sizeof(t))) {
-            GGML_LOG_DEBUG("failed to disable thread power throttling %d : (%d)\n", prio, (int) GetLastError());
-            return false;
-        }
-        #endif
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    if (!SetThreadPriority(GetCurrentThread(), p)) {
-        fprintf(stderr, "warn: failed to set thread priority %d : (%d)\n", prio, (int) GetLastError());
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__APPLE__)
-#include <sys/types.h>
-#include <sys/resource.h>
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    // Not supported on Apple platforms
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    struct sched_param p;
-    int32_t policy = SCHED_OTHER;
-    switch (prio) {
-        // TODO: there seems to be no way to set lower prio on Apple platforms
-        case GGML_SCHED_PRIO_LOW:      policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
-        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
-        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
-    if (err != 0) {
-        fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__linux__)
-// TODO: this may not work on BSD, to be verified
-
 static bool ggml_thread_apply_affinity(const bool * mask) {
     cpu_set_t cpuset;
     int err;
@@ -2600,14 +2108,10 @@ static bool ggml_thread_apply_affinity(const bool * mask) {
         }
     }
 
-#ifdef __ANDROID__
     err = sched_setaffinity(0, sizeof(cpuset), &cpuset);
     if (err < 0) {
         err = errno;
     }
-#else
-    err = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-#endif
     if (err != 0) {
         fprintf(stderr, "warn: failed to set affinity mask 0x%llx : %s (%d)\n", (unsigned long long)mask, strerror(err), err);
         return false;
@@ -2640,20 +2144,6 @@ static bool ggml_thread_apply_priority(int32_t prio) {
 
     return true;
 }
-
-#else // unsupported platforms
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    UNUSED(prio);
-    return true;
-}
-
-#endif
 
 static bool ggml_thread_cpumask_is_valid(const bool * mask) {
     for (int i = 0; i < GGML_MAX_N_THREADS; i++) {
@@ -3415,245 +2905,45 @@ void ggml_cpu_fp32_to_fp32(const float * x, float * y, int64_t n) {
 }
 
 void ggml_cpu_fp32_to_fp16(const float * x, ggml_fp16_t * y, int64_t n) {
-    int64_t i = 0;
-#if defined(__F16C__)
-#if defined(__AVX512F__)
-    for (; i + 15 < n; i += 16) {
-        __m512 x_vec = _mm512_loadu_ps(x + i);
-        __m256i y_vec = _mm512_cvtps_ph(x_vec, _MM_FROUND_TO_NEAREST_INT);
-        _mm256_storeu_si256((__m256i *)(y + i), y_vec);
-    }
-#endif
-    for (; i + 7 < n; i += 8) {
-        __m256 x_vec = _mm256_loadu_ps(x + i);
-        __m128i y_vec = _mm256_cvtps_ph(x_vec, _MM_FROUND_TO_NEAREST_INT);
-        _mm_storeu_si128((__m128i *)(y + i), y_vec);
-    }
-    for (; i + 3 < n; i += 4) {
-        __m128 x_vec = _mm_loadu_ps(x + i);
-        __m128i y_vec = _mm_cvtps_ph(x_vec, _MM_FROUND_TO_NEAREST_INT);
-        _mm_storel_epi64((__m128i *)(y + i), y_vec);
-    }
-#elif defined(__riscv_zvfh)
-    for (int vl; i < n; i += vl) {
-        vl = __riscv_vsetvl_e32m2(n - i);
-        vfloat32m2_t vx = __riscv_vle32_v_f32m2(&x[i], vl);
-        vfloat16m1_t vy = __riscv_vfncvt_f_f_w_f16m1(vx, vl);
-        __riscv_vse16_v_f16m1((_Float16 *)&y[i], vy, vl);
-    }
-#elif defined(__VXE__) || defined(__VXE2__)
-    for (; i + 7 < n; i += 8) {
-        const uint32x4_t v_yl = __lzs_f32cx4_to_f16(vec_xl(0, x + i + 0));
-        const uint32x4_t v_yh = __lzs_f32cx4_to_f16(vec_xl(0, x + i + 4));
-        vec_xst(vec_pack(v_yl, v_yh), 0, (uint16_t *)(y + i));
-    }
-#endif
-    for (; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         y[i] = GGML_CPU_FP32_TO_FP16(x[i]);
     }
 }
 
 void ggml_cpu_fp16_to_fp32(const ggml_fp16_t * x, float * y, int64_t n) {
-    int64_t i = 0;
-#if defined(__F16C__)
-#if defined(__AVX512F__)
-    for (; i + 15 < n; i += 16) {
-        __m256i x_vec = _mm256_loadu_si256((const __m256i *)(x + i));
-        __m512 y_vec = _mm512_cvtph_ps(x_vec);
-        _mm512_storeu_ps(y + i, y_vec);
-    }
-#endif
-    for (; i + 7 < n; i += 8) {
-        __m128i x_vec = _mm_loadu_si128((const __m128i *)(x + i));
-        __m256 y_vec = _mm256_cvtph_ps(x_vec);
-        _mm256_storeu_ps(y + i, y_vec);
-    }
-    for (; i + 3 < n; i += 4) {
-        __m128i x_vec = _mm_loadl_epi64((const __m128i *)(x + i));
-        __m128 y_vec = _mm_cvtph_ps(x_vec);
-        _mm_storeu_ps(y + i, y_vec);
-    }
-
-#elif defined(__riscv_v) && defined(__riscv_zvfhmin)
-    // calculate step size
-    const int epr = __riscv_vsetvlmax_e16m2();
-    const int step = epr * 2;
-    const int np = (n & ~(step - 1));
-
-    // unroll by 2
-    for (; i < np; i += step) {
-        vfloat16m2_t ax0 = __riscv_vle16_v_f16m2((const _Float16*)x + i, epr);
-        vfloat32m4_t ay0 = __riscv_vfwcvt_f_f_v_f32m4(ax0, epr);
-        __riscv_vse32_v_f32m4(y + i, ay0, epr);
-
-        vfloat16m2_t ax1 = __riscv_vle16_v_f16m2((const _Float16*)x + i + epr, epr);
-        vfloat32m4_t ay1 = __riscv_vfwcvt_f_f_v_f32m4(ax1, epr);
-        __riscv_vse32_v_f32m4(y + i + epr, ay1, epr);
-    }
-
-    // leftovers
-    int vl;
-    for (i = np; i < n; i += vl) {
-        vl = __riscv_vsetvl_e16m2(n - i);
-        vfloat16m2_t ax0 = __riscv_vle16_v_f16m2((const _Float16*)x + i, vl);
-        vfloat32m4_t ay0 = __riscv_vfwcvt_f_f_v_f32m4(ax0, vl);
-        __riscv_vse32_v_f32m4(y + i, ay0, vl);
-    }
-
-#endif
-
-    for (; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         y[i] = GGML_CPU_FP16_TO_FP32(x[i]);
     }
 }
 
 void ggml_cpu_fp32_to_bf16(const float * x, ggml_bf16_t * y, int64_t n) {
-    int64_t i = 0;
-    for (; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         y[i] = GGML_FP32_TO_BF16(x[i]);
     }
 }
 
 void ggml_cpu_fp32_to_i32(const float * x, int32_t * y, int64_t n) {
-    int64_t i = 0;
-    for (; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
         y[i] = x[i];
     }
 }
 
 void ggml_cpu_bf16_to_fp32(const ggml_bf16_t * x, float * y, int64_t n) {
-    int64_t i = 0;
-#if defined(__AVX2__)
-#if defined(__AVX512F__)
-    for (; i + 15 < n; i += 16) {
-        _mm512_storeu_ps(y + i,
-                        _mm512_castsi512_ps(
-                            _mm512_slli_epi32(
-                                _mm512_cvtepu16_epi32(
-                                    _mm256_loadu_si256(
-                                        (const __m256i *)(x + i))),
-                                16)));
-    }
-#endif
-    for (; i + 7 < n; i += 8) {
-        _mm256_storeu_ps(y + i,
-                        _mm256_castsi256_ps(
-                            _mm256_slli_epi32(
-                                _mm256_cvtepu16_epi32(
-                                    _mm_loadu_si128(
-                                        (const __m128i *)(x + i))),
-                                16)));
-    }
-#elif defined(__riscv_v) && defined(__riscv_zvfbfmin)
-    // calculate step size
-    const int epr = __riscv_vsetvlmax_e16m2();
-    const int step = epr * 2;
-    const int np = (n & ~(step - 1));
-
-    // unroll by 2
-    for (; i < np; i += step) {
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16*)x + i, epr);
-        vfloat32m4_t ay0 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax0, epr);
-        __riscv_vse32_v_f32m4(y + i, ay0, epr);
-
-        vbfloat16m2_t ax1 = __riscv_vle16_v_bf16m2((const __bf16*)x + i + epr, epr);
-        vfloat32m4_t ay1 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax1, epr);
-        __riscv_vse32_v_f32m4(y + i + epr, ay1, epr);
-    }
-
-    // leftovers
-    int vl;
-    for (i = np; i < n; i += vl) {
-        vl = __riscv_vsetvl_e16m2(n - i);
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16*)x + i, vl);
-        vfloat32m4_t ay0 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax0, vl);
-        __riscv_vse32_v_f32m4(y + i, ay0, vl);
-    }
-#endif
-    for (; i < n; i++) {
+    for (int64_t i = 0; i < n; i++) {
         y[i] = GGML_BF16_TO_FP32(x[i]);
     }
 }
 
-int ggml_cpu_has_avx(void) {
-#if defined(__AVX__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx_vnni(void) {
-#if defined(__AVXVNNI__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx2(void) {
-#if defined(__AVX2__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx512(void) {
-#if defined(__AVX512F__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx512_vbmi(void) {
-#if defined(__AVX512VBMI__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx512_vnni(void) {
-#if defined(__AVX512VNNI__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_avx512_bf16(void) {
-#if defined(__AVX512BF16__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_amx_int8(void) {
-#if defined(__AMX_INT8__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_bmi2(void) {
-#if defined(__BMI2__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_fma(void) {
-#if defined(__FMA__)
-    return 1;
-#else
-    return 0;
-#endif
-}
+int ggml_cpu_has_avx(void) { return 0; }
+int ggml_cpu_has_avx_vnni(void) { return 0; }
+int ggml_cpu_has_avx2(void) { return 0; }
+int ggml_cpu_has_avx512(void) { return 0; }
+int ggml_cpu_has_avx512_vbmi(void) { return 0; }
+int ggml_cpu_has_avx512_vnni(void) { return 0; }
+int ggml_cpu_has_avx512_bf16(void) { return 0; }
+int ggml_cpu_has_amx_int8(void) { return 0; }
+int ggml_cpu_has_bmi2(void) { return 0; }
+int ggml_cpu_has_fma(void) { return 0; }
 
 int ggml_cpu_has_arm_fma(void) {
 #if defined(__ARM_FEATURE_FMA)
@@ -3663,29 +2953,9 @@ int ggml_cpu_has_arm_fma(void) {
 #endif
 }
 
-int ggml_cpu_has_riscv_v(void) {
-#if defined(__riscv_v)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_get_rvv_vlen(void) {
-#if defined(__riscv) && defined(__riscv_v)
-    return ggml_riscv_arch_features.rvv_vlen;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_f16c(void) {
-#if defined(__F16C__)
-    return 1;
-#else
-    return 0;
-#endif
-}
+int ggml_cpu_has_riscv_v(void) { return 0; }
+int ggml_cpu_get_rvv_vlen(void) { return 0; }
+int ggml_cpu_has_f16c(void) { return 0; }
 
 int ggml_cpu_has_fp16_va(void) {
 #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
@@ -3695,13 +2965,7 @@ int ggml_cpu_has_fp16_va(void) {
 #endif
 }
 
-int ggml_cpu_has_wasm_simd(void) {
-#if defined(__wasm_simd128__)
-    return 1;
-#else
-    return 0;
-#endif
-}
+int ggml_cpu_has_wasm_simd(void) { return 0; }
 
 int ggml_cpu_has_llamafile(void) {
 #if defined(GGML_USE_LLAMAFILE)
@@ -3711,37 +2975,10 @@ int ggml_cpu_has_llamafile(void) {
 #endif
 }
 
-int ggml_cpu_has_sse3(void) {
-#if defined(__SSE3__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_ssse3(void) {
-#if defined(__SSSE3__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_vsx(void) {
-#if defined(__POWER9_VECTOR__)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int ggml_cpu_has_vxe(void) {
-#if defined(__VXE__) || defined(__VXE2__)
-    return 1;
-#else
-    return 0;
-#endif
-}
+int ggml_cpu_has_sse3(void) { return 0; }
+int ggml_cpu_has_ssse3(void) { return 0; }
+int ggml_cpu_has_vsx(void) { return 0; }
+int ggml_cpu_has_vxe(void) { return 0; }
 
 int ggml_cpu_has_neon(void) {
 #if defined(__ARM_ARCH) && defined(__ARM_NEON)
@@ -3843,29 +3080,16 @@ void ggml_cpu_init(void) {
             GGML_PRINT_DEBUG("%s: GELU, Quick GELU, SILU and EXP tables initialized in %f ms\n", __func__, (t_end - t_start)/1000.0);
 
 #ifdef GGML_USE_OPENMP
-            //if (!getenv("OMP_WAIT_POLICY")) {
-            //    // set the wait policy to active, so that OpenMP threads don't sleep
-            //    setenv("OMP_WAIT_POLICY", "active", 0)
-            //}
-
             if (!getenv("KMP_BLOCKTIME")) {
                 // set the time to wait before sleeping a thread
                 // this is less aggressive than setting the wait policy to active, but should achieve similar results in most cases
-#ifdef _WIN32
-                _putenv_s("KMP_BLOCKTIME", "200"); // 200ms
-#else
                 setenv("KMP_BLOCKTIME", "200", 0); // 200ms
-#endif
             }
 #endif
         }
 
 #if defined(__ARM_ARCH)
         ggml_init_arm_arch_features();
-#endif
-
-#if defined(__riscv)
-        ggml_init_riscv_arch_features();
 #endif
 
         {

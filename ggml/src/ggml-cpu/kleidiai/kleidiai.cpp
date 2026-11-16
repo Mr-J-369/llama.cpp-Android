@@ -24,17 +24,12 @@
 #include <climits>
 #include <charconv>
 #include <system_error>
-#if defined(__linux__)
 #include <asm/hwcap.h>
 #include <dirent.h>
 #include <sys/auxv.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#elif defined(__APPLE__)
-#include <sys/sysctl.h>
-#include <sys/types.h>
-#endif
 
 #include "kleidiai.h"
 
@@ -97,7 +92,6 @@ static const char* cpu_feature_to_string(cpu_feature f) {
     }
 }
 
-#if defined(__linux__) && defined(__aarch64__)
 static bool parse_cpu_dir_name(const char* name, size_t* cpu) {
     if (strncmp(name, "cpu", 3) != 0 ||
         name[3] < '0' || name[3] > '9') {
@@ -138,20 +132,6 @@ static std::vector<size_t> detect_cpu_ids() {
     cpus.erase(std::unique(cpus.begin(), cpus.end()), cpus.end());
     return cpus;
 }
-#endif
-
-#if defined(__APPLE__) && defined(__aarch64__)
-static bool apple_sme_counted_perf_level(std::string name) {
-    for (std::string::size_type i = 0; i < name.size(); ++i) {
-        name[i] = (char) std::tolower((unsigned char) name[i]);
-    }
-
-    // Conservative ceiling: only count perf-level names observed to provide full SME throughput.
-    // Future names should be calibrated here before they raise the automatic SME thread cap.
-    return name.find("super") != std::string::npos ||
-           name.find("performance") != std::string::npos;
-}
-#endif
 
 static void add_smcus_from_smidr(uint64_t smidr, size_t & num_private, std::map<uint32_t, size_t> & shared_counts) {
     // Arm ARM: SMIDR_EL1. SH==0 is implementation-defined; keep the existing
@@ -194,7 +174,6 @@ static size_t detect_num_smcus() {
         return 0;
     }
 
-#if defined(__linux__) && defined(__aarch64__)
     // Linux/aarch64: Best-effort count of Streaming Mode Compute Units (SMCUs) via SMIDR_EL1 sysfs.
     size_t num_private = 0;
     std::map<uint32_t, size_t> shared_counts;
@@ -223,66 +202,6 @@ static size_t detect_num_smcus() {
         total += entry.second;
     }
     return total;
-
-#elif defined(__APPLE__) && defined(__aarch64__)
-    int perf_levels = 0;
-    size_t size = sizeof(perf_levels);
-    if (sysctlbyname("hw.nperflevels", &perf_levels, &size, nullptr, 0) != 0 ||
-        size != sizeof(perf_levels) || perf_levels <= 0) {
-        return 0;
-    }
-
-    size_t units = 0;
-    for (int i = 0; i < perf_levels; ++i) {
-        char key[64] = {};
-        int physical_cpus = 0;
-        int cpus_per_l2 = 0;
-
-        snprintf(key, sizeof(key), "hw.perflevel%d.physicalcpu", i);
-        size = sizeof(physical_cpus);
-        if (sysctlbyname(key, &physical_cpus, &size, nullptr, 0) != 0 ||
-            size != sizeof(physical_cpus) || physical_cpus <= 0) {
-            continue;
-        }
-
-        snprintf(key, sizeof(key), "hw.perflevel%d.cpusperl2", i);
-        size = sizeof(cpus_per_l2);
-        if (sysctlbyname(key, &cpus_per_l2, &size, nullptr, 0) != 0 ||
-            size != sizeof(cpus_per_l2) || cpus_per_l2 <= 0) {
-            continue;
-        }
-
-        snprintf(key, sizeof(key), "hw.perflevel%d.name", i);
-        size = 0;
-        if (sysctlbyname(key, nullptr, &size, nullptr, 0) != 0 || size == 0) {
-            continue;
-        }
-
-        std::string name(size, '\0');
-        if (sysctlbyname(key, &name[0], &size, nullptr, 0) != 0) {
-            continue;
-        }
-        name.resize(size);
-        while (!name.empty() && name.back() == '\0') {
-            name.pop_back();
-        }
-
-        if (apple_sme_counted_perf_level(name)) {
-            units += (size_t) ((physical_cpus + cpus_per_l2 - 1) / cpus_per_l2);
-        }
-    }
-
-    return units;
-
-#elif defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
-    // No verified Windows arm64 SMCU detection path yet. Return unknown and use
-    // GGML_KLEIDIAI_SME=N as a diagnostics/debug override for SME thread cap
-    // calibration until a detection mechanism is verified on real hardware.
-    return 0;
-
-#else
-    return 0;
-#endif
 }
 
 static int parse_uint_env(const char *s, const char *name, bool *ok) {

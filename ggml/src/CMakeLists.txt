@@ -253,7 +253,6 @@ elseif (GGML_CPU)
     ggml_add_cpu_backend_variant_impl("")
 endif()
 
-ggml_add_backend(Vulkan)
 ggml_add_backend(OpenCL)
 ggml_add_backend(Hexagon)
 

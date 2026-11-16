@@ -9,13 +9,7 @@
 // can be used consistently between C and C++ TUs; the previous macro form
 // diverged based on include order and undersized the work buffer.
 // ref: https://github.com/ggml-org/llama.cpp/pull/28882
-#if defined(__POWER9_VECTOR__)
-#define CACHE_LINE_SIZE 128
-#elif defined(__VXE__) || defined(__VXE2__)
-#define CACHE_LINE_SIZE 256
-#else
 #define CACHE_LINE_SIZE 64
-#endif
 
 static const size_t CACHE_LINE_SIZE_F32 = CACHE_LINE_SIZE/sizeof(float);
 

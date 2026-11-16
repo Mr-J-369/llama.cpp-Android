@@ -25,8 +25,6 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         ggml-cpu/ggml-cpu.cpp
         ggml-cpu/repack.cpp
         ggml-cpu/repack.h
-        ggml-cpu/hbm.cpp
-        ggml-cpu/hbm.h
         ggml-cpu/quants.c
         ggml-cpu/quants.h
         ggml-cpu/traits.cpp
@@ -56,24 +54,12 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         target_link_libraries(${GGML_CPU_NAME} PRIVATE ${GGML_OPENMP_TARGET_C} ${GGML_OPENMP_TARGET_CXX})
     endif()
 
-    if (GGML_CPU_HBM)
-        find_library(memkind memkind REQUIRED)
-        message(STATUS "Using memkind for CPU HBM")
-        target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_CPU_HBM)
-        target_link_libraries(${GGML_CPU_NAME} PUBLIC memkind)
-    endif()
-
     if (GGML_SYSTEM_ARCH STREQUAL "ARM")
         message(STATUS "ARM detected")
         list(APPEND GGML_CPU_SOURCES
             ggml-cpu/arch/arm/quants.c
             ggml-cpu/arch/arm/repack.cpp
             )
-
-        check_cxx_compiler_flag(-mfp16-format=ieee GGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E)
-        if (NOT "${GGML_COMPILER_SUPPORTS_FP16_FORMAT_I3E}" STREQUAL "")
-            list(APPEND ARCH_FLAGS -mfp16-format=ieee)
-        endif()
 
         if (GGML_CPU_ARM_ARCH)
             list(APPEND ARCH_FLAGS -march=${GGML_CPU_ARM_ARCH})
@@ -119,28 +105,7 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm ${ARCH_DEFINITIONS})
         endif()
 
-        message(STATUS "Checking for ARM features using flags:")
-        foreach(flag IN LISTS ARCH_FLAGS)
-            message(STATUS "  ${flag}")
-        endforeach()
-
-        include(CheckCXXSourceCompiles)
-        set(CMAKE_REQUIRED_FLAGS_SAVE ${CMAKE_REQUIRED_FLAGS})
-        string(REPLACE ";" " " ARCH_FLAGS_STR "${ARCH_FLAGS}")
-        set(CMAKE_REQUIRED_FLAGS "${ARCH_FLAGS_STR}")
-        foreach(feature DOTPROD SVE MATMUL_INT8 FMA FP16_VECTOR_ARITHMETIC SME)
-            set(ARM_FEATURE "HAVE_${feature}")
-            check_cxx_source_compiles(
-                "
-                #if !defined(__ARM_FEATURE_${feature})
-                #  error \"Feature ${feature} is not defined\"
-                #endif
-                int main() { return 0; }
-                "
-                ${ARM_FEATURE}
-            )
-        endforeach()
-        set(CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS_SAVE})
+        message(STATUS "ARM flags for ${GGML_CPU_NAME}: ${ARCH_FLAGS}")
     else()
         message(WARNING "Unknown CPU architecture. Falling back to generic implementations.")
         list(APPEND ARCH_FLAGS -DGGML_CPU_GENERIC)

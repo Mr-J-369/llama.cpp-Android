@@ -134,7 +134,6 @@ add_library(${TARGET}
 set_target_properties(${TARGET} PROPERTIES
     VERSION ${LLAMA_VERSION_BASE}
     SOVERSION ${LLAMA_VERSION_MAJOR}
-    MACHO_CURRENT_VERSION 0 # keep macOS linker from seeing oversized version number
 )
 
 target_include_directories(${TARGET} PUBLIC .)
@@ -147,9 +146,6 @@ endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-    # TODO: make fine-grained exports in the future
-    set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
 target_link_libraries(${TARGET} PUBLIC  llama-common-base)
@@ -182,14 +178,6 @@ if (LLAMA_LLGUIDANCE)
 
     target_include_directories(${TARGET} PRIVATE ${LLGUIDANCE_PATH})
     target_link_libraries(${TARGET} PRIVATE llguidance)
-    if (WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32 userenv ntdll bcrypt)
-    endif()
 endif()
 
 target_link_libraries(${TARGET} PUBLIC llama Threads::Threads)
-
-if (CMAKE_SYSTEM_NAME MATCHES "AIX")
-    # AIX's flock() function comes from libbsd.a
-    target_link_libraries(${TARGET} PRIVATE -lbsd)
-endif()
