@@ -4,7 +4,6 @@
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
-#include "amx/amx.h"
 
 #include <cctype>
 #include <string>
@@ -18,42 +17,13 @@
 #    include "kleidiai/kleidiai.h"
 #endif
 
-#ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-#    include "spacemit/ime.h"
-#endif
-
-#if defined(_WIN32)
-#    define WIN32_LEAN_AND_MEAN
-#    ifndef NOMINMAX
-#        define NOMINMAX
-#    endif
-#    include <windows.h>
-#else
-#    include <unistd.h>
-#endif
-
-#if defined(__APPLE__)
-#    include <sys/sysctl.h>
-#    include <sys/types.h>
-#endif
+#include <unistd.h>
 
 // ggml-backend interface
 
 std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_types() {
     static std::vector<ggml_backend_buffer_type_t> bufts = []() {
         std::vector<ggml_backend_buffer_type_t> bufts;
-
-#if defined(__AMX_INT8__) && defined(__AVX512VNNI__)
-        if (ggml_backend_amx_buffer_type()) {
-            bufts.push_back(ggml_backend_amx_buffer_type());
-        }
-#endif
-
-#ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-        if (ggml_backend_cpu_riscv64_spacemit_buffer_type()) {
-            bufts.push_back(ggml_backend_cpu_riscv64_spacemit_buffer_type());
-        }
-#endif
 
 #ifdef GGML_USE_CPU_KLEIDIAI
         if (ggml_backend_cpu_kleidiai_buffer_type()) {
