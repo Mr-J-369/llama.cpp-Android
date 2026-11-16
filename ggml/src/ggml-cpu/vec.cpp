@@ -252,6 +252,42 @@ void ggml_vec_dot_bf16(int n, float * GGML_RESTRICT s, size_t bs, ggml_bf16_t * 
         }
         GGML_F32x4_REDUCE_4(sumf, sum[0], sum[1], sum[2], sum[3]);
     }
+#elif defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+    float32x4_t sum0 = vdupq_n_f32(0.0f);
+    float32x4_t sum1 = vdupq_n_f32(0.0f);
+    float32x4_t sum2 = vdupq_n_f32(0.0f);
+    float32x4_t sum3 = vdupq_n_f32(0.0f);
+    for (; i + 32 <= n; i += 32) {
+        sum0 = vbfdotq_f32(sum0, vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(x + i +  0))), vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(y + i +  0))));
+        sum1 = vbfdotq_f32(sum1, vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(x + i +  8))), vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(y + i +  8))));
+        sum2 = vbfdotq_f32(sum2, vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(x + i + 16))), vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(y + i + 16))));
+        sum3 = vbfdotq_f32(sum3, vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(x + i + 24))), vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(y + i + 24))));
+    }
+    for (; i + 8 <= n; i += 8) {
+        sum0 = vbfdotq_f32(sum0, vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(x + i))), vreinterpretq_bf16_u16(vld1q_u16((const uint16_t *)(y + i))));
+    }
+    sumf += (ggml_float) vaddvq_f32(vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
+#elif defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA)
+    float32x4_t sum0 = vdupq_n_f32(0.0f);
+    float32x4_t sum1 = vdupq_n_f32(0.0f);
+    float32x4_t sum2 = vdupq_n_f32(0.0f);
+    float32x4_t sum3 = vdupq_n_f32(0.0f);
+    for (; i + 16 <= n; i += 16) {
+        const uint16x8_t vx0 = vld1q_u16((const uint16_t *)(x + i + 0));
+        const uint16x8_t vx1 = vld1q_u16((const uint16_t *)(x + i + 8));
+        const uint16x8_t vy0 = vld1q_u16((const uint16_t *)(y + i + 0));
+        const uint16x8_t vy1 = vld1q_u16((const uint16_t *)(y + i + 8));
+        sum0 = vfmaq_f32(sum0, vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(vx0)),  16)), vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(vy0)),  16)));
+        sum1 = vfmaq_f32(sum1, vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(vx0)), 16)), vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(vy0)), 16)));
+        sum2 = vfmaq_f32(sum2, vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(vx1)),  16)), vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(vy1)),  16)));
+        sum3 = vfmaq_f32(sum3, vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(vx1)), 16)), vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(vy1)), 16)));
+    }
+    for (; i + 4 <= n; i += 4) {
+        const uint16x4_t vx = vld1_u16((const uint16_t *)(x + i));
+        const uint16x4_t vy = vld1_u16((const uint16_t *)(y + i));
+        sum0 = vfmaq_f32(sum0, vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vx), 16)), vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vy), 16)));
+    }
+    sumf += (ggml_float) vaddvq_f32(vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
 #endif
 
     for (; i < n; ++i) {
@@ -422,6 +458,24 @@ void ggml_vec_dot_f16_f32(int n, float * GGML_RESTRICT s, size_t bs, const ggml_
     r = _mm_add_ps(r, _mm_movehl_ps(r, r));
     r = _mm_add_ss(r, _mm_movehdup_ps(r));
     sumf = _mm_cvtss_f32(r);
+#elif defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    float32x4_t acc2 = vdupq_n_f32(0.0f);
+    float32x4_t acc3 = vdupq_n_f32(0.0f);
+    for (; i + 16 <= n; i += 16) {
+        const float16x8_t x0 = vld1q_f16((const __fp16 *)(x + i + 0));
+        const float16x8_t x1 = vld1q_f16((const __fp16 *)(x + i + 8));
+        acc0 = vfmaq_f32(acc0, vcvt_f32_f16(vget_low_f16(x0)),  vld1q_f32(y + i +  0));
+        acc1 = vfmaq_f32(acc1, vcvt_f32_f16(vget_high_f16(x0)), vld1q_f32(y + i +  4));
+        acc2 = vfmaq_f32(acc2, vcvt_f32_f16(vget_low_f16(x1)),  vld1q_f32(y + i +  8));
+        acc3 = vfmaq_f32(acc3, vcvt_f32_f16(vget_high_f16(x1)), vld1q_f32(y + i + 12));
+    }
+    for (; i + 4 <= n; i += 4) {
+        const float16x4_t x0 = vld1_f16((const __fp16 *)(x + i));
+        acc0 = vfmaq_f32(acc0, vcvt_f32_f16(x0), vld1q_f32(y + i));
+    }
+    sumf = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
 #elif defined(GGML_SIMD)
     // convert chunks of x to F32 and reuse the F32 SIMD dot
     // TODO: convert F16 to F32 in-register and fuse the dot (needs a new SIMD macro); also avoid the per-chunk call overhead for tiny k

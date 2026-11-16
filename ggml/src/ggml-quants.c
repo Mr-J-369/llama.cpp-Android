@@ -615,7 +615,74 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
 }
 
 void dequantize_row_f8_e4m3(const ggml_fp8_e4m3_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    for (int64_t i = 0; i < k; ++i) {
+    int64_t i = 0;
+#if defined(__ARM_NEON) && defined(__aarch64__) && defined(__ARM_FP16_FORMAT_IEEE)
+    const uint8x16_t sub_hi_tbl = { 0x00, 0x18, 0x1C, 0x1E, 0x20, 0x21, 0x22, 0x23, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const uint8x16_t c_sign8    = vdupq_n_u8(0x80u);
+    const uint8x16_t c_ax_mask8 = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_sub_lim8 = vdupq_n_u8(8u);
+    const uint8x16_t c_bias8    = vdupq_n_u8(64u);
+    const uint8x16_t c_nan8     = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_nan_hi8  = vdupq_n_u8(0x7Eu);
+
+    for (; i + 16 <= k; i += 16) {
+        const uint8x16_t raw    = vld1q_u8((const uint8_t *)(x + i));
+        const uint8x16_t ax     = vandq_u8(raw, c_ax_mask8);
+        const uint8x16_t is_sub = vcltq_u8(ax, c_sub_lim8);
+        const uint8x16_t sign   = vandq_u8(raw, c_sign8);
+
+        const uint8x16_t norm_hi = vshrq_n_u8(vaddq_u8(ax, c_bias8), 1);
+        const uint8x16_t norm_lo = vshlq_n_u8(ax, 7);
+        const uint8x16_t sub_hi  = vqtbl1q_u8(sub_hi_tbl, ax);
+
+        uint8x16_t hi_byte = vbslq_u8(is_sub, sub_hi, norm_hi);
+        uint8x16_t lo_byte = vbicq_u8(norm_lo, is_sub);
+
+        const uint8x16_t is_nan = vceqq_u8(ax, c_nan8);
+        hi_byte = vbslq_u8(is_nan, c_nan_hi8, hi_byte);
+        lo_byte = vbicq_u8(lo_byte, is_nan);
+        hi_byte = vorrq_u8(hi_byte, sign);
+
+        const float16x8_t f16_0 = vreinterpretq_f16_u8(vzip1q_u8(lo_byte, hi_byte));
+        const float16x8_t f16_1 = vreinterpretq_f16_u8(vzip2q_u8(lo_byte, hi_byte));
+
+        vst1q_f32(y + i +  0, vcvt_f32_f16(vget_low_f16 (f16_0)));
+        vst1q_f32(y + i +  4, vcvt_f32_f16(vget_high_f16(f16_0)));
+        vst1q_f32(y + i +  8, vcvt_f32_f16(vget_low_f16 (f16_1)));
+        vst1q_f32(y + i + 12, vcvt_f32_f16(vget_high_f16(f16_1)));
+    }
+#elif defined(__ARM_NEON)
+    const uint32x4_t c_sign_mask = vdupq_n_u32(0x80u);
+    const uint32x4_t c_ax_mask   = vdupq_n_u32(0x7Fu);
+    const uint32x4_t c_exp_bias  = vdupq_n_u32(120u << 3);
+    const uint32x4_t c_sub_lim   = vdupq_n_u32(8u);
+    const uint32x4_t c_nan_in    = vdupq_n_u32(0x7Fu);
+    const uint32x4_t c_nan_out   = vdupq_n_u32(0x7FC00000u);
+    const float32x4_t c_sub_scale = vdupq_n_f32(0x1.0p-9f);
+
+    for (; i + 16 <= k; i += 16) {
+        const uint8x16_t raw = vld1q_u8((const uint8_t *)(x + i));
+        const uint16x8_t lo16 = vmovl_u8(vget_low_u8(raw));
+        const uint16x8_t hi16 = vmovl_u8(vget_high_u8(raw));
+        const uint32x4_t lanes[4] = {
+            vmovl_u16(vget_low_u16(lo16)),
+            vmovl_u16(vget_high_u16(lo16)),
+            vmovl_u16(vget_low_u16(hi16)),
+            vmovl_u16(vget_high_u16(hi16)),
+        };
+        for (int j = 0; j < 4; ++j) {
+            const uint32x4_t r    = lanes[j];
+            const uint32x4_t sign = vshlq_n_u32(vandq_u32(r, c_sign_mask), 24);
+            const uint32x4_t ax   = vandq_u32(r, c_ax_mask);
+            const uint32x4_t norm = vshlq_n_u32(vaddq_u32(ax, c_exp_bias), 20);
+            const uint32x4_t sub  = vreinterpretq_u32_f32(vmulq_f32(vcvtq_f32_u32(ax), c_sub_scale));
+            uint32x4_t mag        = vbslq_u32(vcltq_u32(ax, c_sub_lim), sub, norm);
+            mag                   = vbslq_u32(vceqq_u32(ax, c_nan_in), c_nan_out, mag);
+            vst1q_f32(y + i + j * 4, vreinterpretq_f32_u32(vorrq_u32(sign, mag)));
+        }
+    }
+#endif
+    for (; i < k; ++i) {
         y[i] = ggml_f8_e4m3_to_fp32(x[i].bits);
     }
 }

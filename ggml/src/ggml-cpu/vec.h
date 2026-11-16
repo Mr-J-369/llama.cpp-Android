@@ -95,6 +95,16 @@ inline static void ggml_vec_add_f32 (const int n, float * z, const float * x, co
         __m256 vz = _mm256_add_ps(vx, vy);
         _mm256_storeu_ps(z + i, vz);
     }
+#elif defined(__ARM_NEON)
+    for (; i + 15 < n; i += 16) {
+        vst1q_f32(z + i +  0, vaddq_f32(vld1q_f32(x + i +  0), vld1q_f32(y + i +  0)));
+        vst1q_f32(z + i +  4, vaddq_f32(vld1q_f32(x + i +  4), vld1q_f32(y + i +  4)));
+        vst1q_f32(z + i +  8, vaddq_f32(vld1q_f32(x + i +  8), vld1q_f32(y + i +  8)));
+        vst1q_f32(z + i + 12, vaddq_f32(vld1q_f32(x + i + 12), vld1q_f32(y + i + 12)));
+    }
+    for (; i + 3 < n; i += 4) {
+        vst1q_f32(z + i, vaddq_f32(vld1q_f32(x + i), vld1q_f32(y + i)));
+    }
 #endif
     for (; i < n; ++i) {
         z[i] = x[i] + y[i];
@@ -107,7 +117,23 @@ inline static void ggml_vec_add_f16 (const int n, ggml_fp16_t * z, const ggml_fp
     }
 }
 inline static void ggml_vec_add1_f32(const int n, float * z, const float * x, const float   v) { for (int i = 0; i < n; ++i) z[i]  = x[i] + v;    }
-inline static void ggml_vec_acc_f32 (const int n, float * y, const float * x)                  { for (int i = 0; i < n; ++i) y[i] += x[i];        }
+inline static void ggml_vec_acc_f32 (const int n, float * y, const float * x) {
+    int i = 0;
+#if defined(__ARM_NEON)
+    for (; i + 15 < n; i += 16) {
+        vst1q_f32(y + i +  0, vaddq_f32(vld1q_f32(y + i +  0), vld1q_f32(x + i +  0)));
+        vst1q_f32(y + i +  4, vaddq_f32(vld1q_f32(y + i +  4), vld1q_f32(x + i +  4)));
+        vst1q_f32(y + i +  8, vaddq_f32(vld1q_f32(y + i +  8), vld1q_f32(x + i +  8)));
+        vst1q_f32(y + i + 12, vaddq_f32(vld1q_f32(y + i + 12), vld1q_f32(x + i + 12)));
+    }
+    for (; i + 3 < n; i += 4) {
+        vst1q_f32(y + i, vaddq_f32(vld1q_f32(y + i), vld1q_f32(x + i)));
+    }
+#endif
+    for (; i < n; ++i) {
+        y[i] += x[i];
+    }
+}
 inline static void ggml_vec_acc1_f32(const int n, float * y, const float   v)                  { for (int i = 0; i < n; ++i) y[i] += v;           }
 inline static void ggml_vec_sub_f32 (const int n, float * z, const float * x, const float * y) { for (int i = 0; i < n; ++i) z[i]  = x[i] - y[i]; }
 inline static void ggml_vec_sub_f16 (const int n, ggml_fp16_t * z, const ggml_fp16_t * x, const ggml_fp16_t * y) {
@@ -471,6 +497,51 @@ inline static void ggml_vec_mad_f16_f32(const int n, float * GGML_RESTRICT y, co
     }
 }
 
+// y (F32) += x (F8_E4M3)*v
+inline static void ggml_vec_mad_f8_e4m3_f32(const int n, float * GGML_RESTRICT y, const ggml_fp8_e4m3_t * GGML_RESTRICT x, const float v) {
+    int i = 0;
+#if defined(__ARM_NEON) && defined(__aarch64__) && defined(__ARM_FP16_FORMAT_IEEE)
+    const float32x4_t vx        = vdupq_n_f32(v);
+    const uint8x16_t sub_hi_tbl = { 0x00, 0x18, 0x1C, 0x1E, 0x20, 0x21, 0x22, 0x23, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const uint8x16_t c_sign8    = vdupq_n_u8(0x80u);
+    const uint8x16_t c_ax_mask8 = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_sub_lim8 = vdupq_n_u8(8u);
+    const uint8x16_t c_bias8    = vdupq_n_u8(64u);
+    const uint8x16_t c_nan8     = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_nan_hi8  = vdupq_n_u8(0x7Eu);
+
+    for (; i + 16 <= n; i += 16) {
+        const uint8x16_t raw    = vld1q_u8((const uint8_t *)(x + i));
+        const uint8x16_t ax     = vandq_u8(raw, c_ax_mask8);
+        const uint8x16_t is_sub = vcltq_u8(ax, c_sub_lim8);
+        const uint8x16_t sign   = vandq_u8(raw, c_sign8);
+
+        const uint8x16_t norm_hi = vshrq_n_u8(vaddq_u8(ax, c_bias8), 1);
+        const uint8x16_t norm_lo = vshlq_n_u8(ax, 7);
+        const uint8x16_t sub_hi  = vqtbl1q_u8(sub_hi_tbl, ax);
+
+        uint8x16_t hi_byte = vbslq_u8(is_sub, sub_hi, norm_hi);
+        uint8x16_t lo_byte = vbicq_u8(norm_lo, is_sub);
+
+        const uint8x16_t is_nan = vceqq_u8(ax, c_nan8);
+        hi_byte = vbslq_u8(is_nan, c_nan_hi8, hi_byte);
+        lo_byte = vbicq_u8(lo_byte, is_nan);
+        hi_byte = vorrq_u8(hi_byte, sign);
+
+        const float16x8_t f16_0 = vreinterpretq_f16_u8(vzip1q_u8(lo_byte, hi_byte));
+        const float16x8_t f16_1 = vreinterpretq_f16_u8(vzip2q_u8(lo_byte, hi_byte));
+
+        vst1q_f32(y + i +  0, vfmaq_f32(vld1q_f32(y + i +  0), vcvt_f32_f16(vget_low_f16 (f16_0)), vx));
+        vst1q_f32(y + i +  4, vfmaq_f32(vld1q_f32(y + i +  4), vcvt_f32_f16(vget_high_f16(f16_0)), vx));
+        vst1q_f32(y + i +  8, vfmaq_f32(vld1q_f32(y + i +  8), vcvt_f32_f16(vget_low_f16 (f16_1)), vx));
+        vst1q_f32(y + i + 12, vfmaq_f32(vld1q_f32(y + i + 12), vcvt_f32_f16(vget_high_f16(f16_1)), vx));
+    }
+#endif
+    for (; i < n; ++i) {
+        y[i] += ggml_table_f32_f8_e4m3[x[i].bits] * v;
+    }
+}
+
 inline static void ggml_vec_mad_f16(const int n, ggml_fp16_t * GGML_RESTRICT y, const ggml_fp16_t * GGML_RESTRICT x, const float v) {
 #if defined(GGML_SIMD) && defined(__ARM_FEATURE_SVE)
     const int sve_register_length = svcntb() * 8;
@@ -629,12 +700,45 @@ inline static void ggml_vec_mad_f32_unroll(const int n, const int xs, const int 
 
 #if defined(GGML_SIMD)
     #if defined(__ARM_FEATURE_SVE)
-        // scalar Route to scalar implementation       //TODO: Write SVE code
-        for (int k = 0; k < GGML_VEC_MAD_UNROLL; ++k) {
-            for (int i = 0; i < n; ++i) {
-                y[i] += x[k][i]*v[k][0];
+        #if defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)
+            const int np = (n & ~(16 - 1));
+
+            GGML_F32x4 vx[GGML_VEC_MAD_UNROLL];
+
+            for (int k = 0; k < GGML_VEC_MAD_UNROLL; ++k) {
+                vx[k] = GGML_F32x4_SET1(v[k][0]);
             }
-        }
+
+            GGML_F32x4 ax[GGML_VEC_MAD_UNROLL][4];
+            GGML_F32x4 ay[4];
+
+            for (int i = 0; i < np; i += 16) {
+                for (int j = 0; j < 4; j++) {
+                    ay[j] = GGML_F32x4_LOAD(y + i + j * 4);
+
+                    for (int k = 0; k < GGML_VEC_MAD_UNROLL; ++k) {
+                        ax[k][j] = GGML_F32x4_LOAD(x[k] + i + j * 4);
+                        ay[j] = GGML_F32x4_FMA(ay[j], ax[k][j], vx[k]);
+                    }
+
+                    GGML_F32x4_STORE(y + i + j * 4, ay[j]);
+                }
+            }
+
+            // leftovers
+            for (int k = 0; k < GGML_VEC_MAD_UNROLL; ++k) {
+                for (int i = np; i < n; ++i) {
+                    y[i] += x[k][i]*v[k][0];
+                }
+            }
+        #else
+            // scalar Route to scalar implementation
+            for (int k = 0; k < GGML_VEC_MAD_UNROLL; ++k) {
+                for (int i = 0; i < n; ++i) {
+                    y[i] += x[k][i]*v[k][0];
+                }
+            }
+        #endif
     #elif defined(__riscv_v)
         for (int i = 0, avl; i < n; i += avl) {
             avl = __riscv_vsetvl_e32m8(n - i);
@@ -692,9 +796,13 @@ inline static void ggml_vec_mad1_f32(const int n, float * y, const float * x, co
     vDSP_vsmsa(x, 1, &s, &b, y, 1, n);
 #elif defined(GGML_SIMD)
     #if defined(__ARM_FEATURE_SVE)
-        // scalar ; TODO: Write SVE code
-        for (int i = 0; i < n; ++i) {
-            y[i] = x[i]*s + b;
+        const int vlen = svcntw();
+        const svfloat32_t vs = svdup_n_f32(s);
+        const svfloat32_t vb = svdup_n_f32(b);
+        for (int i = 0; i < n; i += vlen) {
+            const svbool_t pg = svwhilelt_b32(i, n);
+            const svfloat32_t ax = svld1_f32(pg, x + i);
+            svst1_f32(pg, y + i, svmla_f32_x(pg, vb, ax, vs));
         }
     #elif defined(__riscv_v)
         for (int i = 0, avl; i < n; i += avl) {

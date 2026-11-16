@@ -64,7 +64,54 @@ void quantize_row_nvfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, i
 }
 
 void quantize_row_f8_e4m3(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    quantize_row_f8_e4m3_ref(x, y, k);
+    int64_t i = 0;
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    uint8_t * GGML_RESTRICT dst = (uint8_t *) y;
+
+    const uint32x4_t c_sign_mask = vdupq_n_u32(0x80000000u);
+    const uint32x4_t c_abs_mask  = vdupq_n_u32(0x7FFFFFFFu);
+    const uint32x4_t c_bias_sub  = vdupq_n_u32(0x3C000000u);
+    const uint32x4_t c_sub_lim   = vdupq_n_u32(0x3C800000u);
+    const uint32x4_t c_round_cst = vdupq_n_u32(0x7FFFFu);
+    const uint32x4_t c_one       = vdupq_n_u32(1u);
+    const uint32x4_t c_max_mag   = vdupq_n_u32(0x7Eu);
+    const uint32x4_t c_inf_bits  = vdupq_n_u32(0x7F800000u);
+    const uint32x4_t c_nan_out   = vdupq_n_u32(0x7Fu);
+    const float32x4_t c_sub_mul  = vdupq_n_f32(512.0f);
+
+    #define GGML_F32X4_TO_F8_U32(f32_in) ({                                              \
+        const uint32x4_t _u      = vreinterpretq_u32_f32((f32_in));                      \
+        const uint32x4_t _sign   = vshrq_n_u32(vandq_u32(_u, c_sign_mask), 24);          \
+        const uint32x4_t _ax     = vandq_u32(_u, c_abs_mask);                            \
+        const uint32x4_t _reb    = vsubq_u32(_ax, c_bias_sub);                           \
+        const uint32x4_t _lsb    = vandq_u32(vshrq_n_u32(_reb, 20), c_one);              \
+        const uint32x4_t _norm   = vshrq_n_u32(vaddq_u32(vaddq_u32(_reb, c_round_cst), _lsb), 20); \
+        const uint32x4_t _sub    = vcvtnq_u32_f32(vmulq_f32(vreinterpretq_f32_u32(_ax), c_sub_mul)); \
+        uint32x4_t _mag          = vbslq_u32(vcltq_u32(_ax, c_sub_lim), _sub, _norm);    \
+        _mag                     = vminq_u32(_mag, c_max_mag);                           \
+        vbslq_u32(vcgtq_u32(_ax, c_inf_bits), c_nan_out, vorrq_u32(_sign, _mag));        \
+    })
+
+    for (; i + 16 <= k; i += 16) {
+        const uint32x4_t r0 = GGML_F32X4_TO_F8_U32(vld1q_f32(x + i +  0));
+        const uint32x4_t r1 = GGML_F32X4_TO_F8_U32(vld1q_f32(x + i +  4));
+        const uint32x4_t r2 = GGML_F32X4_TO_F8_U32(vld1q_f32(x + i +  8));
+        const uint32x4_t r3 = GGML_F32X4_TO_F8_U32(vld1q_f32(x + i + 12));
+        const uint16x8_t p0 = vcombine_u16(vmovn_u32(r0), vmovn_u32(r1));
+        const uint16x8_t p1 = vcombine_u16(vmovn_u32(r2), vmovn_u32(r3));
+        vst1q_u8(dst + i, vcombine_u8(vmovn_u16(p0), vmovn_u16(p1)));
+    }
+    for (; i + 4 <= k; i += 4) {
+        const uint32x4_t r0 = GGML_F32X4_TO_F8_U32(vld1q_f32(x + i));
+        const uint16x4_t p0 = vmovn_u32(r0);
+        const uint8x8_t  b0 = vmovn_u16(vcombine_u16(p0, p0));
+        vst1_lane_u32((uint32_t *)(dst + i), vreinterpret_u32_u8(b0), 0);
+    }
+    #undef GGML_F32X4_TO_F8_U32
+#endif
+    if (i < k) {
+        quantize_row_f8_e4m3_ref(x + i, (ggml_fp8_e4m3_t *) y + i, k - i);
+    }
 }
 
 //
@@ -379,7 +426,97 @@ void ggml_vec_dot_f8_e4m3_f32(int n, float * GGML_RESTRICT s, size_t bs, const v
 
     float sumf = 0.0f;
     int pos = 0;
-#if defined(GGML_SIMD) && !defined(__ARM_FEATURE_SVE) && !defined(__riscv_v_intrinsic)
+#if defined(__ARM_NEON) && defined(__aarch64__) && defined(__ARM_FP16_FORMAT_IEEE)
+    float32x4_t sum0 = vdupq_n_f32(0.0f);
+    float32x4_t sum1 = vdupq_n_f32(0.0f);
+    float32x4_t sum2 = vdupq_n_f32(0.0f);
+    float32x4_t sum3 = vdupq_n_f32(0.0f);
+
+    const uint8x16_t sub_hi_tbl = { 0x00, 0x18, 0x1C, 0x1E, 0x20, 0x21, 0x22, 0x23, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const uint8x16_t c_sign8    = vdupq_n_u8(0x80u);
+    const uint8x16_t c_ax_mask8 = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_sub_lim8 = vdupq_n_u8(8u);
+    const uint8x16_t c_bias8    = vdupq_n_u8(64u);
+    const uint8x16_t c_nan8     = vdupq_n_u8(0x7Fu);
+    const uint8x16_t c_nan_hi8  = vdupq_n_u8(0x7Eu);
+
+    for (; pos + 16 <= n; pos += 16) {
+        const uint8x16_t raw    = vld1q_u8((const uint8_t *)(x + pos));
+        const uint8x16_t ax     = vandq_u8(raw, c_ax_mask8);
+        const uint8x16_t is_sub = vcltq_u8(ax, c_sub_lim8);
+        const uint8x16_t sign   = vandq_u8(raw, c_sign8);
+
+        const uint8x16_t norm_hi = vshrq_n_u8(vaddq_u8(ax, c_bias8), 1);
+        const uint8x16_t norm_lo = vshlq_n_u8(ax, 7);
+        const uint8x16_t sub_hi  = vqtbl1q_u8(sub_hi_tbl, ax);
+
+        uint8x16_t hi_byte = vbslq_u8(is_sub, sub_hi, norm_hi);
+        uint8x16_t lo_byte = vbicq_u8(norm_lo, is_sub);
+
+        const uint8x16_t is_nan = vceqq_u8(ax, c_nan8);
+        hi_byte = vbslq_u8(is_nan, c_nan_hi8, hi_byte);
+        lo_byte = vbicq_u8(lo_byte, is_nan);
+        hi_byte = vorrq_u8(hi_byte, sign);
+
+        const float16x8_t f16_0 = vreinterpretq_f16_u8(vzip1q_u8(lo_byte, hi_byte));
+        const float16x8_t f16_1 = vreinterpretq_f16_u8(vzip2q_u8(lo_byte, hi_byte));
+
+        sum0 = vfmaq_f32(sum0, vcvt_f32_f16(vget_low_f16 (f16_0)), vld1q_f32(y + pos +  0));
+        sum1 = vfmaq_f32(sum1, vcvt_f32_f16(vget_high_f16(f16_0)), vld1q_f32(y + pos +  4));
+        sum2 = vfmaq_f32(sum2, vcvt_f32_f16(vget_low_f16 (f16_1)), vld1q_f32(y + pos +  8));
+        sum3 = vfmaq_f32(sum3, vcvt_f32_f16(vget_high_f16(f16_1)), vld1q_f32(y + pos + 12));
+    }
+    sumf = vaddvq_f32(vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
+#elif defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA)
+    float32x4_t sum0 = vdupq_n_f32(0.0f);
+    float32x4_t sum1 = vdupq_n_f32(0.0f);
+    float32x4_t sum2 = vdupq_n_f32(0.0f);
+    float32x4_t sum3 = vdupq_n_f32(0.0f);
+
+    const uint32x4_t c_sign_mask = vdupq_n_u32(0x80u);
+    const uint32x4_t c_ax_mask   = vdupq_n_u32(0x7Fu);
+    const uint32x4_t c_exp_bias  = vdupq_n_u32(120u << 3);
+    const uint32x4_t c_sub_lim   = vdupq_n_u32(8u);
+    const uint32x4_t c_nan_in    = vdupq_n_u32(0x7Fu);
+    const uint32x4_t c_nan_out   = vdupq_n_u32(0x7FC00000u);
+    const float32x4_t c_sub_scale = vdupq_n_f32(0x1.0p-9f);
+
+    #define GGML_F8_E4M3_U32_TO_F32(u32_in) ({                                              \
+        const uint32x4_t _r    = (u32_in);                                                  \
+        const uint32x4_t _sign = vshlq_n_u32(vandq_u32(_r, c_sign_mask), 24);               \
+        const uint32x4_t _ax   = vandq_u32(_r, c_ax_mask);                                  \
+        const uint32x4_t _norm = vshlq_n_u32(vaddq_u32(_ax, c_exp_bias), 20);               \
+        const uint32x4_t _sub  = vreinterpretq_u32_f32(                                     \
+            vmulq_f32(vcvtq_f32_u32(_ax), c_sub_scale));                                    \
+        uint32x4_t _mag        = vbslq_u32(vcltq_u32(_ax, c_sub_lim), _sub, _norm);         \
+        _mag                   = vbslq_u32(vceqq_u32(_ax, c_nan_in), c_nan_out, _mag);      \
+        vreinterpretq_f32_u32(vorrq_u32(_sign, _mag));                                      \
+    })
+
+    for (; pos + 16 <= n; pos += 16) {
+        const uint8x16_t raw = vld1q_u8((const uint8_t *)(x + pos));
+        const uint16x8_t lo16 = vmovl_u8(vget_low_u8(raw));
+        const uint16x8_t hi16 = vmovl_u8(vget_high_u8(raw));
+
+        const float32x4_t x0 = GGML_F8_E4M3_U32_TO_F32(vmovl_u16(vget_low_u16(lo16)));
+        const float32x4_t x1 = GGML_F8_E4M3_U32_TO_F32(vmovl_u16(vget_high_u16(lo16)));
+        const float32x4_t x2 = GGML_F8_E4M3_U32_TO_F32(vmovl_u16(vget_low_u16(hi16)));
+        const float32x4_t x3 = GGML_F8_E4M3_U32_TO_F32(vmovl_u16(vget_high_u16(hi16)));
+
+        sum0 = vfmaq_f32(sum0, x0, vld1q_f32(y + pos +  0));
+        sum1 = vfmaq_f32(sum1, x1, vld1q_f32(y + pos +  4));
+        sum2 = vfmaq_f32(sum2, x2, vld1q_f32(y + pos +  8));
+        sum3 = vfmaq_f32(sum3, x3, vld1q_f32(y + pos + 12));
+    }
+    for (; pos + 4 <= n; pos += 4) {
+        const uint8x8_t raw8 = vreinterpret_u8_u32(vdup_n_u32(*(const uint32_t *)(x + pos)));
+        const uint16x4_t lo16 = vget_low_u16(vmovl_u8(raw8));
+        const float32x4_t x0 = GGML_F8_E4M3_U32_TO_F32(vmovl_u16(lo16));
+        sum0 = vfmaq_f32(sum0, x0, vld1q_f32(y + pos));
+    }
+    #undef GGML_F8_E4M3_U32_TO_F32
+    sumf = vaddvq_f32(vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
+#elif defined(GGML_SIMD) && !defined(__ARM_FEATURE_SVE) && !defined(__riscv_v_intrinsic)
     GGML_F32_VEC sum[GGML_F32_ARR] = { GGML_F32_VEC_ZERO };
     const int np = n - n % GGML_F32_STEP;
     for (; pos < np; pos += GGML_F32_STEP) {

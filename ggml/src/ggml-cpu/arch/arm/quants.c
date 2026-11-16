@@ -3392,10 +3392,10 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
                         svint8_t q8bytes_4 = svld1_s8(pg8_16, q8+48);
                         q8 += 64;
 
-                        q6h_1 = svand_u8_x(pg16_8, mone, svlsl_n_u8_x(pg16_8, qhbits_1, 4));
-                        q6h_2 = svand_u8_x(pg16_8, mone, svlsl_n_u8_x(pg16_8, qhbits_2, 4));
-                        q6h_3 = svand_u8_x(pg16_8, mone, svlsl_n_u8_x(pg16_8, qhbits_1, 2));
-                        q6h_4 = svand_u8_x(pg16_8, mone, svlsl_n_u8_x(pg16_8, qhbits_2, 2));
+                        q6h_1 = svand_u8_x(pg8_16, mone, svlsl_n_u8_x(pg8_16, qhbits_1, 4));
+                        q6h_2 = svand_u8_x(pg8_16, mone, svlsl_n_u8_x(pg8_16, qhbits_2, 4));
+                        q6h_3 = svand_u8_x(pg8_16, mone, svlsl_n_u8_x(pg8_16, qhbits_1, 2));
+                        q6h_4 = svand_u8_x(pg8_16, mone, svlsl_n_u8_x(pg8_16, qhbits_2, 2));
                         q6bytes_1 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svand_u8_x(pg8_16, q6bits_1, m4b), q6h_1));
                         q6bytes_2 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svand_u8_x(pg8_16, q6bits_2, m4b), q6h_2));
                         q6bytes_3 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svand_u8_x(pg8_16, q6bits_3, m4b), q6h_3));
@@ -3412,10 +3412,10 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
                         q8bytes_4 = svld1_s8(pg8_16, q8+48);
                         q8 += 64;
 
-                        q6h_1 = svand_u8_x(pg16_8, mone, qhbits_1);
-                        q6h_2 = svand_u8_x(pg16_8, mone, qhbits_2);
-                        q6h_3 = svand_u8_x(pg16_8, mone, svlsr_n_u8_x(pg16_8, qhbits_1, 2));
-                        q6h_4 = svand_u8_x(pg16_8, mone, svlsr_n_u8_x(pg16_8, qhbits_2, 2));
+                        q6h_1 = svand_u8_x(pg8_16, mone, qhbits_1);
+                        q6h_2 = svand_u8_x(pg8_16, mone, qhbits_2);
+                        q6h_3 = svand_u8_x(pg8_16, mone, svlsr_n_u8_x(pg8_16, qhbits_1, 2));
+                        q6h_4 = svand_u8_x(pg8_16, mone, svlsr_n_u8_x(pg8_16, qhbits_2, 2));
                         q6bytes_1 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svlsr_n_u8_x(pg8_16, q6bits_1, 4), q6h_1));
                         q6bytes_2 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svlsr_n_u8_x(pg8_16, q6bits_2, 4), q6h_2));
                         q6bytes_3 = svreinterpret_s8_u8(svorr_u8_x(pg8_16, svlsr_n_u8_x(pg8_16, q6bits_3, 4), q6h_3));

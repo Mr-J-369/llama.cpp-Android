@@ -4,14 +4,25 @@
 
 #include "simd-mappings.h"
 
-// TODO: add support for sizeless vector types
-#if defined(GGML_SIMD) && !defined(__ARM_FEATURE_SVE)
+// Use fixed-width 128-bit NEON registers when __ARM_FEATURE_SVE is also enabled
+#if defined(GGML_SIMD) && (!defined(__ARM_FEATURE_SVE) || (defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)))
 
-// These are in units of GGML_F32_EPR
-#if defined(__ARM_NEON)
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)
+    #define GGML_GEMM_F32_EPR       4
+    #define GGML_GEMM_F32_VEC       GGML_F32x4
+    #define GGML_GEMM_F32_VEC_LOAD  GGML_F32x4_LOAD
+    #define GGML_GEMM_F32_VEC_STORE GGML_F32x4_STORE
+    #define GGML_GEMM_F32_VEC_SET1  GGML_F32x4_SET1
+    #define GGML_GEMM_F32_VEC_FMA   GGML_F32x4_FMA
     static constexpr int GEMM_RM = 4;
-    static constexpr int GEMM_RN = 4; // 16+4+1 = 25/32
+    static constexpr int GEMM_RN = 4; // 16+4+1 = 21/32
 #else
+    #define GGML_GEMM_F32_EPR       GGML_F32_EPR
+    #define GGML_GEMM_F32_VEC       GGML_F32_VEC
+    #define GGML_GEMM_F32_VEC_LOAD  GGML_F32_VEC_LOAD
+    #define GGML_GEMM_F32_VEC_STORE GGML_F32_VEC_STORE
+    #define GGML_GEMM_F32_VEC_SET1  GGML_F32_VEC_SET1
+    #define GGML_GEMM_F32_VEC_FMA   GGML_F32_VEC_FMA
     static constexpr int GEMM_RM = 2;
     static constexpr int GEMM_RN = 2;
 #endif
@@ -23,31 +34,31 @@ static inline void simd_gemm_ukernel(
     const float * GGML_RESTRICT B,
     int K, int N)
 {
-    static constexpr int KN = GGML_F32_EPR;
+    static constexpr int KN = GGML_GEMM_F32_EPR;
 
-    GGML_F32_VEC acc[RM][RN];
+    GGML_GEMM_F32_VEC acc[RM][RN];
     for (int64_t i = 0; i < RM; i++) {
         for (int r = 0; r < RN; r++) {
-            acc[i][r] = GGML_F32_VEC_LOAD(C + i * N + r * KN);
+            acc[i][r] = GGML_GEMM_F32_VEC_LOAD(C + i * N + r * KN);
         }
     }
 
     for (int64_t kk = 0; kk < K; kk++) {
-        GGML_F32_VEC Bv[RN];
+        GGML_GEMM_F32_VEC Bv[RN];
         for (int r = 0; r < RN; r++) {
-            Bv[r] = GGML_F32_VEC_LOAD(B + kk * N + r * KN);
+            Bv[r] = GGML_GEMM_F32_VEC_LOAD(B + kk * N + r * KN);
         }
         for (int64_t i = 0; i < RM; i++) {
-            GGML_F32_VEC p = GGML_F32_VEC_SET1(A[i * K + kk]);
+            GGML_GEMM_F32_VEC p = GGML_GEMM_F32_VEC_SET1(A[i * K + kk]);
             for (int r = 0; r < RN; r++) {
-                acc[i][r] = GGML_F32_VEC_FMA(acc[i][r], Bv[r], p);
+                acc[i][r] = GGML_GEMM_F32_VEC_FMA(acc[i][r], Bv[r], p);
             }
         }
     }
 
     for (int64_t i = 0; i < RM; i++) {
         for (int r = 0; r < RN; r++) {
-            GGML_F32_VEC_STORE(C + i * N + r * KN, acc[i][r]);
+            GGML_GEMM_F32_VEC_STORE(C + i * N + r * KN, acc[i][r]);
         }
     }
 }
@@ -77,7 +88,7 @@ static void simd_gemm(
     const float * GGML_RESTRICT B,
     int M, int K, int N)
 {
-    static constexpr int KN = GGML_F32_EPR;
+    static constexpr int KN = GGML_GEMM_F32_EPR;
 
     int64_t ii = 0;
     for (; ii + GEMM_RM <= M; ii += GEMM_RM) {
@@ -113,6 +124,13 @@ static void simd_gemm(
         C += N;
     }
 }
+
+#undef GGML_GEMM_F32_EPR
+#undef GGML_GEMM_F32_VEC
+#undef GGML_GEMM_F32_VEC_LOAD
+#undef GGML_GEMM_F32_VEC_STORE
+#undef GGML_GEMM_F32_VEC_SET1
+#undef GGML_GEMM_F32_VEC_FMA
 #else // scalar path
 
 static void simd_gemm(

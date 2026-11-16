@@ -190,6 +190,43 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
 //   number of elements to fit in a single register
 //
 
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)
+
+// Fixed-width 128-bit NEON F32 helpers (also available alongside SVE)
+#define GGML_F32x4              float32x4_t
+#define GGML_F32x4_ZERO         vdupq_n_f32(0.0f)
+#define GGML_F32x4_SET1(x)      vdupq_n_f32(x)
+#define GGML_F32x4_LOAD         vld1q_f32
+#define GGML_F32x4_STORE        vst1q_f32
+#define GGML_F32x4_FMA(a, b, c) vfmaq_f32(a, b, c)
+#define GGML_F32x4_ADD          vaddq_f32
+#define GGML_F32x4_MUL          vmulq_f32
+#define GGML_F32x4_REDUCE_ONE(x) vaddvq_f32(x)
+#define GGML_F32x4_REDUCE_4(res, s0, s1, s2, s3)        \
+{                                                       \
+    const float32x4_t t0 = vaddq_f32((s0), (s2));       \
+    const float32x4_t t1 = vaddq_f32((s1), (s3));       \
+    (res) = (ggml_float) vaddvq_f32(vaddq_f32(t0, t1)); \
+}
+#define GGML_F32x4_REDUCE(res, x)                       \
+{                                                       \
+    int offset = GGML_F32_ARR >> 1;                     \
+    for (int i = 0; i < offset; ++i) {                  \
+        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
+    }                                                   \
+    offset >>= 1;                                       \
+    for (int i = 0; i < offset; ++i) {                  \
+        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
+    }                                                   \
+    offset >>= 1;                                       \
+    for (int i = 0; i < offset; ++i) {                  \
+        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
+    }                                                   \
+    (res) = (ggml_float) GGML_F32x4_REDUCE_ONE((x)[0]); \
+}
+
+#endif // defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE)
+
 #if defined(__ARM_FEATURE_SVE) && defined(__ARM_FEATURE_FMA)
 
 #define GGML_SIMD
@@ -336,7 +373,7 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
     #define GGML_F32Cx4_FMA(a, b, c) vfmaq_f32(a, b, c)
     #define GGML_F32Cx4_ADD          vaddq_f32
     #define GGML_F32Cx4_MUL          vmulq_f32
-    #define GGML_F32Cx4_REDUCE       GGML_F32x4_REDUCE
+    #define GGML_F32Cx4_REDUCE(res, x) GGML_F32x4_REDUCE_4((res), (x)[0], (x)[1], (x)[2], (x)[3])
 
     #define GGML_F16_VEC                GGML_F32Cx4
     #define GGML_F16_VEC_ZERO           GGML_F32Cx4_ZERO
@@ -357,32 +394,6 @@ inline static float ggml_lookup_fp16_to_fp32(ggml_fp16_t f) {
 
 #define GGML_F32_STEP 16
 #define GGML_F32_EPR  4
-
-#define GGML_F32x4              float32x4_t
-#define GGML_F32x4_ZERO         vdupq_n_f32(0.0f)
-#define GGML_F32x4_SET1(x)      vdupq_n_f32(x)
-#define GGML_F32x4_LOAD         vld1q_f32
-#define GGML_F32x4_STORE        vst1q_f32
-#define GGML_F32x4_FMA(a, b, c) vfmaq_f32(a, b, c)
-#define GGML_F32x4_ADD          vaddq_f32
-#define GGML_F32x4_MUL          vmulq_f32
-#define GGML_F32x4_REDUCE_ONE(x) vaddvq_f32(x)
-#define GGML_F32x4_REDUCE(res, x)                       \
-{                                                       \
-    int offset = GGML_F32_ARR >> 1;                     \
-    for (int i = 0; i < offset; ++i) {                  \
-        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
-    }                                                   \
-    offset >>= 1;                                       \
-    for (int i = 0; i < offset; ++i) {                  \
-        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
-    }                                                   \
-    offset >>= 1;                                       \
-    for (int i = 0; i < offset; ++i) {                  \
-        (x)[i] = vaddq_f32((x)[i], (x)[offset+i]);      \
-    }                                                   \
-    (res) = (ggml_float) GGML_F32x4_REDUCE_ONE((x)[0]); \
-}
 
 #define GGML_F32_VEC        GGML_F32x4
 #define GGML_F32_VEC_ZERO   GGML_F32x4_ZERO

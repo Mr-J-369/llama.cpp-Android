@@ -5,6 +5,8 @@
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
+#include "ggml-quants.h"
+#include "quants.h"
 #include "unary-ops.h"
 #include "vec.h"
 
@@ -103,6 +105,36 @@ static void ggml_compute_forward_dup_flt(
                             id += rs;
                         }
                         id += rs * (ne01 - ir1);
+                    }
+                }
+            } else if constexpr (std::is_same_v<src_t, float> && std::is_same_v<dst_t, ggml_fp8_e4m3_t>) {
+                size_t id = 0;
+                ggml_fp8_e4m3_t * dst_ptr = (ggml_fp8_e4m3_t *) dst->data;
+
+                for (int i03 = 0; i03 < ne03; i03++) {
+                    for (int i02 = 0; i02 < ne02; i02++) {
+                        id += ne00 * ir0;
+                        for (int i01 = ir0; i01 < ir1; i01++) {
+                            const float * src0_ptr = (const float *) ((const char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
+                            quantize_row_f8_e4m3(src0_ptr, dst_ptr + id, ne00);
+                            id += ne00;
+                        }
+                        id += ne00 * (ne01 - ir1);
+                    }
+                }
+            } else if constexpr (std::is_same_v<src_t, ggml_fp8_e4m3_t> && std::is_same_v<dst_t, float>) {
+                size_t id = 0;
+                float * dst_ptr = (float *) dst->data;
+
+                for (int i03 = 0; i03 < ne03; i03++) {
+                    for (int i02 = 0; i02 < ne02; i02++) {
+                        id += ne00 * ir0;
+                        for (int i01 = ir0; i01 < ir1; i01++) {
+                            const ggml_fp8_e4m3_t * src0_ptr = (const ggml_fp8_e4m3_t *) ((const char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
+                            dequantize_row_f8_e4m3(src0_ptr, dst_ptr + id, ne00);
+                            id += ne00;
+                        }
+                        id += ne00 * (ne01 - ir1);
                     }
                 }
             } else {
@@ -8940,6 +8972,8 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             // V += v*expf(s - M)
             if (v->type == GGML_TYPE_F16) {
                 ggml_vec_mad_f16_f32(DV, VKQ32, (const ggml_fp16_t *) v_data, vs);
+            } else if (v->type == GGML_TYPE_F8_E4M3) {
+                ggml_vec_mad_f8_e4m3_f32(DV, VKQ32, (const ggml_fp8_e4m3_t *) v_data, vs);
             } else if (v_to_float) {
                 v_to_float(v_data, V32, DV);
                 ggml_vec_mad_f32(DV, VKQ32, V32, vs);
@@ -9035,8 +9069,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
 
-    GGML_ASSERT(k->type == v->type);
-    const ggml_type kv_type = k->type;
+    const ggml_type k_type = k->type;
+    const ggml_type v_type = v->type;
+    GGML_ASSERT(k_type == GGML_TYPE_F32 || k_type == GGML_TYPE_F16 || k_type == GGML_TYPE_F8_E4M3);
+    GGML_ASSERT(v_type == GGML_TYPE_F32 || v_type == GGML_TYPE_F16 || v_type == GGML_TYPE_F8_E4M3);
 
 
     // broadcast factors
@@ -9172,10 +9208,15 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
             // Zero-pad the last tile so the GEMM always operates on KV_TILE_SZ columns
             for (int tk = 0; tk < kv_tile; tk++) {
                 const char * k_data = (const char *)k->data + kv_row(ic + tk)*nbk1 + ik2*nbk2 + ik3*nbk3;
-                if (kv_type == GGML_TYPE_F16) {
+                if (k_type == GGML_TYPE_F16) {
                     const ggml_fp16_t * k_f16 = (const ggml_fp16_t *)k_data;
                     for (int64_t dk = 0; dk < DK; dk++) {
                         K_f32[dk * KV_TILE_SZ + tk] = GGML_CPU_FP16_TO_FP32(k_f16[dk]);
+                    }
+                } else if (k_type == GGML_TYPE_F8_E4M3) {
+                    const ggml_fp8_e4m3_t * k_f8 = (const ggml_fp8_e4m3_t *)k_data;
+                    for (int64_t dk = 0; dk < DK; dk++) {
+                        K_f32[dk * KV_TILE_SZ + tk] = ggml_table_f32_f8_e4m3[k_f8[dk].bits];
                     }
                 } else {
                     const float * k_f32_src = (const float *)k_data;
@@ -9237,8 +9278,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
             // Pack V tile to contiguous F32, zero-padded
             for (int tk = 0; tk < kv_tile; tk++) {
                 const char * v_data = (const char *)v->data + kv_row(ic + tk)*nbv1 + iv2*nbv2 + iv3*nbv3;
-                if (kv_type == GGML_TYPE_F16) {
+                if (v_type == GGML_TYPE_F16) {
                     ggml_cpu_fp16_to_fp32((const ggml_fp16_t *)v_data, V32 + tk * DV, DV);
+                } else if (v_type == GGML_TYPE_F8_E4M3) {
+                    dequantize_row_f8_e4m3((const ggml_fp8_e4m3_t *)v_data, V32 + tk * DV, DV);
                 } else {
                     memcpy(V32 + tk * DV, v_data, DV * sizeof(float));
                 }
@@ -9412,8 +9455,9 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const ggml_tensor * kv_rows = dst->src[5];
     const int64_t n_kv_cols = kv_rows ? kv_rows->ne[0] : nek1;
 
-    const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    const bool use_split_kv_path = !use_ref && !kv_rows && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
+    const bool kv_is_f32_f16_or_f8 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_F8_E4M3) &&
+                                     (v->type == GGML_TYPE_F32 || v->type == GGML_TYPE_F16 || v->type == GGML_TYPE_F8_E4M3);
+    const bool use_split_kv_path = !use_ref && !kv_rows && (neq1 == 1 && neq3 == 1) && kv_is_f32_f16_or_f8 && q->type == GGML_TYPE_F32 && nek1 >= 512;
 
     if (use_split_kv_path) {
         const int64_t chunk_size = (nek1 + nth - 1) / nth;
@@ -9472,8 +9516,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
         static constexpr int64_t Q_TILE_SZ  = ggml_fa_tile_config::Q;
         bool use_tiled = !use_ref &&
                                (q->type == GGML_TYPE_F32 &&
-                                kv_is_f32_or_f16 &&
-                                k->type == v->type &&
+                                kv_is_f32_f16_or_f8 &&
                                 neq1 >= Q_TILE_SZ);
 #if defined(GGML_SIMD) && !defined(__x86_64__) && !defined(_M_X64)
 #if defined(__ARM_FEATURE_SVE)
@@ -10095,28 +10138,29 @@ static void ggml_compute_forward_ssm_scan_f32(
                         const int ii = i1 + h*nr;
                         const float x_dt = x[ii] * dt_soft_plus;
 #if defined(__ARM_FEATURE_SVE)
-                        svfloat32_t vx_dt = GGML_F32_VEC_SET1(x_dt);
-                        svfloat32_t vdt_soft_plus = GGML_F32_VEC_SET1(dt_soft_plus);
-                        svfloat32_t r1_vector = GGML_F32_VEC_ZERO;
+                        const svfloat32_t vx_dt = svdup_n_f32(x_dt);
+                        const svfloat32_t vdt_soft_plus = svdup_n_f32(dt_soft_plus);
+                        svfloat32_t r1_vector = svdup_n_f32(0.0f);
 
-                        // d_state
-                        // TODO: what happens when (d_state % svcntw()) != 0?
-                        for (int64_t k = 0; k < nc; k += svcntw()) {
-                            svfloat32_t vA = GGML_F32_VEC_LOAD(&A[h*nc + k]);
-                            svfloat32_t vB = GGML_F32_VEC_LOAD(&B[k + g*nc]);
-                            svfloat32_t vC = GGML_F32_VEC_LOAD(&C[k + g*nc]);
-                            svfloat32_t vs0 = GGML_F32_VEC_LOAD(&s0[ii*nc + k]);
+                        // d_state (predicated for arbitrary nc and SVE vector widths)
+                        const int64_t vlen = svcntw();
+                        for (int64_t k = 0; k < nc; k += vlen) {
+                            const svbool_t pg = svwhilelt_b32(k, nc);
+                            const svfloat32_t vA = svld1_f32(pg, &A[h*nc + k]);
+                            const svfloat32_t vB = svld1_f32(pg, &B[k + g*nc]);
+                            const svfloat32_t vC = svld1_f32(pg, &C[k + g*nc]);
+                            svfloat32_t vs0 = svld1_f32(pg, &s0[ii*nc + k]);
 
-                            svfloat32_t t1 = GGML_F32_VEC_MUL(vdt_soft_plus, vA);
-                            t1 = exp_ps_sve(svptrue_b32(), t1);
-                            svfloat32_t t2 = GGML_F32_VEC_MUL(vx_dt, vB);
+                            svfloat32_t t1 = svmul_f32_x(pg, vdt_soft_plus, vA);
+                            t1 = exp_ps_sve(pg, t1);
+                            const svfloat32_t t2 = svmul_f32_x(pg, vx_dt, vB);
 
-                            vs0 = GGML_F32_VEC_FMA(t2, vs0, t1);
-                            r1_vector = GGML_F32_VEC_ADD(GGML_F32_VEC_MUL(vs0, vC), r1_vector);
+                            vs0 = svmla_f32_x(pg, t2, vs0, t1);
+                            r1_vector = svmla_f32_m(pg, r1_vector, vs0, vC);
 
-                            GGML_F32_VEC_STORE(&s[ii*nc + k], vs0);
+                            svst1_f32(pg, &s[ii*nc + k], vs0);
                         }
-                        y[ii] = GGML_F32xt_REDUCE_ONE(r1_vector);
+                        y[ii] = svaddv_f32(svptrue_b32(), r1_vector);
 #else
                         float sumf = 0.0f;
                         // NOTE: can't really use GGML_SIMD here because d_state is usually 16
@@ -11694,7 +11738,7 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
     int64_t h_stride_2d = head_size * head_size;
 
     #if defined(GGML_SIMD)
-        #if defined(__ARM_FEATURE_SVE) || defined(__riscv_v)
+        #if (defined(__ARM_FEATURE_SVE) && !(defined(__ARM_NEON) && defined(__ARM_FEATURE_FMA) && defined(__ARM_FP16_FORMAT_IEEE))) || defined(__riscv_v)
             // scalar Route to scalar implementation       //TODO: Write SVE code and RVV code
             for (int64_t t = 0; t < T; t++) {
                 int64_t t_offset = t * t_stride;
@@ -11736,6 +11780,32 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
                 }
             }
         #else
+            #if defined(__ARM_FEATURE_SVE)
+                #define RWKV_F32_STEP             16
+                #define RWKV_F32_EPR              4
+                #define RWKV_F32_ARR              4
+                #define RWKV_F32_VEC              GGML_F32x4
+                #define RWKV_F32_VEC_ZERO         GGML_F32x4_ZERO
+                #define RWKV_F32_VEC_SET1         GGML_F32x4_SET1
+                #define RWKV_F32_VEC_LOAD         GGML_F32x4_LOAD
+                #define RWKV_F32_VEC_STORE        GGML_F32x4_STORE
+                #define RWKV_F32_VEC_FMA          GGML_F32x4_FMA
+                #define RWKV_F32_VEC_MUL          GGML_F32x4_MUL
+                #define RWKV_F32_VEC_REDUCE(r, x) GGML_F32x4_REDUCE_4((r), (x)[0], (x)[1], (x)[2], (x)[3])
+            #else
+                #define RWKV_F32_STEP             GGML_F32_STEP
+                #define RWKV_F32_EPR              GGML_F32_EPR
+                #define RWKV_F32_ARR              GGML_F32_ARR
+                #define RWKV_F32_VEC              GGML_F32_VEC
+                #define RWKV_F32_VEC_ZERO         GGML_F32_VEC_ZERO
+                #define RWKV_F32_VEC_SET1         GGML_F32_VEC_SET1
+                #define RWKV_F32_VEC_LOAD         GGML_F32_VEC_LOAD
+                #define RWKV_F32_VEC_STORE        GGML_F32_VEC_STORE
+                #define RWKV_F32_VEC_FMA          GGML_F32_VEC_FMA
+                #define RWKV_F32_VEC_MUL          GGML_F32_VEC_MUL
+                #define RWKV_F32_VEC_REDUCE       GGML_F32_VEC_REDUCE
+            #endif
+
             for (int64_t t = 0; t < T; t++) {
                 int64_t t_offset = t * t_stride;
                 int64_t state_offset = head_size * C * (t / (T / n_seqs));
@@ -11751,49 +11821,53 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
                         int64_t t_h_i_offset = t_h_offset + ii;
                         int64_t h_2d_i_offset = h_2d_offset + ii * h_stride;
 
-                        GGML_F32_VEC v_vec = GGML_F32_VEC_SET1(v[t_h_i_offset]);
+                        RWKV_F32_VEC v_vec = RWKV_F32_VEC_SET1(v[t_h_i_offset]);
 
                         float sa = 0;
                         {
-                            GGML_F32_VEC sum[GGML_F32_ARR] = { GGML_F32_VEC_ZERO };
-                            GGML_F32_VEC ax[GGML_F32_ARR];
-                            GGML_F32_VEC ay[GGML_F32_ARR];
-                            for (int64_t j = 0; j < head_size; j += GGML_F32_STEP) {
-                                for (int64_t kk = 0; kk < GGML_F32_ARR; kk++) {
-                                    ax[kk] = GGML_F32_VEC_LOAD(&a[t_h_offset + j + kk * GGML_F32_EPR]);
-                                    ay[kk] = GGML_F32_VEC_LOAD(&state_prev[h_2d_i_offset + j + kk * GGML_F32_EPR]);
-                                    sum[kk] = GGML_F32_VEC_FMA(sum[kk], ax[kk], ay[kk]);
+                            RWKV_F32_VEC sum[RWKV_F32_ARR] = { RWKV_F32_VEC_ZERO };
+                            RWKV_F32_VEC ax[RWKV_F32_ARR];
+                            RWKV_F32_VEC ay[RWKV_F32_ARR];
+                            int64_t j = 0;
+                            for (; j + RWKV_F32_STEP <= head_size; j += RWKV_F32_STEP) {
+                                for (int64_t kk = 0; kk < RWKV_F32_ARR; kk++) {
+                                    ax[kk] = RWKV_F32_VEC_LOAD(&a[t_h_offset + j + kk * RWKV_F32_EPR]);
+                                    ay[kk] = RWKV_F32_VEC_LOAD(&state_prev[h_2d_i_offset + j + kk * RWKV_F32_EPR]);
+                                    sum[kk] = RWKV_F32_VEC_FMA(sum[kk], ax[kk], ay[kk]);
                                 }
                             }
-                            GGML_F32_VEC_REDUCE(sa, sum);
-                        }
-
-                        GGML_F32_VEC sa_vec = GGML_F32_VEC_SET1(sa);
-
-                        int64_t j = 0;
-                        GGML_F32_VEC result_vec[GGML_F32_ARR] = { GGML_F32_VEC_ZERO };
-                        for (; j < head_size; j += GGML_F32_STEP) {
-                            for (int64_t kk = 0; kk < GGML_F32_ARR; kk++) {
-                                int64_t t_h_j_offset = t_h_offset + j + kk * GGML_F32_EPR;
-                                int64_t h_2d_i_j_offset = h_2d_i_offset + j + kk * GGML_F32_EPR;
-
-                                GGML_F32_VEC r_vec = GGML_F32_VEC_LOAD(&r[t_h_j_offset]);
-                                GGML_F32_VEC w_vec = GGML_F32_VEC_LOAD(&w[t_h_j_offset]);
-                                GGML_F32_VEC k_vec = GGML_F32_VEC_LOAD(&k[t_h_j_offset]);
-                                GGML_F32_VEC b_vec = GGML_F32_VEC_LOAD(&b[t_h_j_offset]);
-
-                                k_vec = GGML_F32_VEC_MUL(v_vec, k_vec);
-
-                                GGML_F32_VEC state_vec = GGML_F32_VEC_LOAD(&state_prev[h_2d_i_j_offset]);
-                                // kv + s * decay + sa * b
-                                state_vec = GGML_F32_VEC_FMA(k_vec, state_vec, w_vec);
-                                state_vec = GGML_F32_VEC_FMA(state_vec, sa_vec, b_vec);
-                                GGML_F32_VEC_STORE(&state_cur[h_2d_i_j_offset], state_vec);
-
-                                result_vec[kk] = GGML_F32_VEC_FMA(result_vec[kk], state_vec, r_vec);
+                            RWKV_F32_VEC_REDUCE(sa, sum);
+                            for (; j < head_size; j++) {
+                                sa += a[t_h_offset + j] * state_prev[h_2d_i_offset + j];
                             }
                         }
-                        GGML_F32_VEC_REDUCE(dst_data[t_h_i_offset], result_vec);
+
+                        RWKV_F32_VEC sa_vec = RWKV_F32_VEC_SET1(sa);
+
+                        int64_t j = 0;
+                        RWKV_F32_VEC result_vec[RWKV_F32_ARR] = { RWKV_F32_VEC_ZERO };
+                        for (; j + RWKV_F32_STEP <= head_size; j += RWKV_F32_STEP) {
+                            for (int64_t kk = 0; kk < RWKV_F32_ARR; kk++) {
+                                int64_t t_h_j_offset = t_h_offset + j + kk * RWKV_F32_EPR;
+                                int64_t h_2d_i_j_offset = h_2d_i_offset + j + kk * RWKV_F32_EPR;
+
+                                RWKV_F32_VEC r_vec = RWKV_F32_VEC_LOAD(&r[t_h_j_offset]);
+                                RWKV_F32_VEC w_vec = RWKV_F32_VEC_LOAD(&w[t_h_j_offset]);
+                                RWKV_F32_VEC k_vec = RWKV_F32_VEC_LOAD(&k[t_h_j_offset]);
+                                RWKV_F32_VEC b_vec = RWKV_F32_VEC_LOAD(&b[t_h_j_offset]);
+
+                                k_vec = RWKV_F32_VEC_MUL(v_vec, k_vec);
+
+                                RWKV_F32_VEC state_vec = RWKV_F32_VEC_LOAD(&state_prev[h_2d_i_j_offset]);
+                                // kv + s * decay + sa * b
+                                state_vec = RWKV_F32_VEC_FMA(k_vec, state_vec, w_vec);
+                                state_vec = RWKV_F32_VEC_FMA(state_vec, sa_vec, b_vec);
+                                RWKV_F32_VEC_STORE(&state_cur[h_2d_i_j_offset], state_vec);
+
+                                result_vec[kk] = RWKV_F32_VEC_FMA(result_vec[kk], state_vec, r_vec);
+                            }
+                        }
+                        RWKV_F32_VEC_REDUCE(dst_data[t_h_i_offset], result_vec);
 
                         // There shouldn't be left-overs though.
                         for (; j < head_size; j++) {
@@ -11813,6 +11887,18 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
                     }
                 }
             }
+
+            #undef RWKV_F32_STEP
+            #undef RWKV_F32_EPR
+            #undef RWKV_F32_ARR
+            #undef RWKV_F32_VEC
+            #undef RWKV_F32_VEC_ZERO
+            #undef RWKV_F32_VEC_SET1
+            #undef RWKV_F32_VEC_LOAD
+            #undef RWKV_F32_VEC_STORE
+            #undef RWKV_F32_VEC_FMA
+            #undef RWKV_F32_VEC_MUL
+            #undef RWKV_F32_VEC_REDUCE
         #endif
     #else
         for (int64_t t = 0; t < T; t++) {
