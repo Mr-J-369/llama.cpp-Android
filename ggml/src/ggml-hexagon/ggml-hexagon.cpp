@@ -24,6 +24,7 @@
 #include <deque>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <initializer_list>
 
 #ifdef _WIN32
@@ -3226,7 +3227,7 @@ static size_t ggml_backend_hexagon_reg_get_device_count(ggml_backend_reg_t reg) 
 static ggml_backend_dev_t ggml_backend_hexagon_reg_get_device(ggml_backend_reg_t reg, size_t index) {
     auto hreg = static_cast<ggml_hexagon_registry *>(reg->context);
 
-    if (index >= opt_ndev || !hreg->devices[index].context) {
+    if (!hreg || index >= opt_ndev || !hreg->devices[index].context) {
         return nullptr;
     }
 
@@ -3362,6 +3363,7 @@ static bool ggml_backend_hexagon_comm_allreduce_tensor(void * comm_ctx_v, struct
 static ggml_backend_buffer_type_t ggml_backend_hexagon_split_buffer_type(int main_device, const float * tensor_split) {
     GGML_UNUSED(tensor_split);
     auto reg = ggml_backend_hexagon_reg();
+    if (!reg) return nullptr;
     auto dev = ggml_backend_reg_dev_get(reg, main_device);
     if (!dev) {
         dev = ggml_backend_reg_dev_get(reg, 0);
@@ -3493,7 +3495,7 @@ static void ggml_hexagon_discover_devices() {
     }
 }
 
-static void ggml_hexagon_init(ggml_backend_reg * reg) {
+static bool ggml_hexagon_init(ggml_backend_reg * reg) {
     // Basic sanity checks to make sure definitions match
     static_assert((unsigned int) HTP_TYPE_Q4_0 == (unsigned int) GGML_TYPE_Q4_0,
                   "please update hexagon_type to match ggml_type");
@@ -3563,22 +3565,79 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     if (!str_arch) {
         int err = htpdrv_get_arch(CDSP_DOMAIN_ID, &opt_arch);
         if (err != 0) {
-            GGML_LOG_ERROR("ggml-hex: failed to query HTP version (err %d) defaulting to v73\n", err);
-            opt_arch = 73;
-        } else {
-            if (opt_arch < 73) {
-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is under supported range, capping at v73\n", opt_arch);
-                opt_arch = 73;
-            } else if (opt_arch > 85) {
-                GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v85\n", opt_arch);
-                opt_arch = 85;
-            }
+            GGML_LOG_ERROR("ggml-hex: failed to query HTP version (err %d), disabling Hexagon backend\n", err);
+            opt_arch = 0;
+            return false;
+        }
+        if (opt_arch < 73) {
+            GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is below minimum supported v73, disabling Hexagon backend\n", opt_arch);
+            opt_arch = 0;
+            return false;
+        }
+        if (opt_arch > 85) {
+            GGML_LOG_WARN("ggml-hex: Hexagon arch v%d is over supported range, capping at v85\n", opt_arch);
+            opt_arch = 85;
         }
     } else {
+        const char * raw_arch = str_arch;
         if (str_arch[0] == 'v' || str_arch[0] == 'V') {
             str_arch++;
         }
-        opt_arch = strtoul(str_arch, NULL, 0);
+        char * end = NULL;
+        unsigned long parsed = strtoul(str_arch, &end, 0);
+        if (*str_arch == '\0' || end == str_arch || *end != '\0' || parsed < 73) {
+            GGML_LOG_WARN("ggml-hex: GGML_HEXAGON_ARCH='%s' is invalid or below minimum supported v73, disabling Hexagon backend\n", raw_arch);
+            opt_arch = 0;
+            return false;
+        }
+        opt_arch = parsed > 85 ? 85 : (int) parsed;
+        if (parsed > 85) {
+            GGML_LOG_WARN("ggml-hex: Hexagon arch v%lu is over supported range, capping at v85\n", parsed);
+        }
+    }
+
+    // Ensure a matching (or highest compatible <= opt_arch) HTP skel binary is available
+    {
+        const std::string lib_dir = htp_lib_dir();
+        if (!lib_dir.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const std::string exact_name = "libggml-htp-v" + std::to_string(opt_arch) + ".so";
+            if (!fs::is_regular_file(fs::path(lib_dir) / exact_name, ec)) {
+                int best_arch = 0;
+                const std::string prefix = "libggml-htp-v";
+                const std::string suffix = ".so";
+                for (const auto & entry : fs::directory_iterator(lib_dir, ec)) {
+                    if (ec) {
+                        break;
+                    }
+                    if (!entry.is_regular_file(ec)) {
+                        continue;
+                    }
+                    const std::string fn = entry.path().filename().string();
+                    if (fn.size() > prefix.size() + suffix.size() &&
+                        fn.rfind(prefix, 0) == 0 &&
+                        fn.compare(fn.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                        const std::string num_str = fn.substr(prefix.size(), fn.size() - prefix.size() - suffix.size());
+                        char * end = NULL;
+                        unsigned long v = strtoul(num_str.c_str(), &end, 10);
+                        if (!num_str.empty() && end != num_str.c_str() && *end == '\0' &&
+                            v >= 73 && (int) v <= opt_arch && (int) v > best_arch) {
+                            best_arch = (int) v;
+                        }
+                    }
+                }
+                if (best_arch == 0) {
+                    GGML_LOG_ERROR("ggml-hex: no compatible HTP skel found in %s for arch v%d, disabling Hexagon backend\n",
+                                   lib_dir.c_str(), opt_arch);
+                    opt_arch = 0;
+                    return false;
+                }
+                GGML_LOG_WARN("ggml-hex: no HTP skel for v%d in %s, using v%d\n",
+                              opt_arch, lib_dir.c_str(), best_arch);
+                opt_arch = best_arch;
+            }
+        }
     }
 
     size_t MiB = 1024 * 1024;
@@ -3834,6 +3893,21 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     // Resolve domain info for all configured devices
     ggml_hexagon_discover_devices();
 
+    bool any_valid_domain = false;
+    for (size_t i = 0; i < opt_ndev; i++) {
+        if (opt_device_configs[i].domain_id >= 0 && !opt_device_configs[i].domain_name.empty()) {
+            any_valid_domain = true;
+            break;
+        }
+    }
+    if (opt_ndev == 0 || !any_valid_domain) {
+        GGML_LOG_ERROR("ggml-hex: no usable CDSP domain discovered, disabling Hexagon backend\n");
+        delete opt_opfilter;
+        opt_opfilter = NULL;
+        opt_ndev = 0;
+        return false;
+    }
+
     if (str_profile) {
         opt_pmu_evt = [&]() -> std::vector<uint32_t> {
             auto v  = str_to_vec<uint32_t>(str_profile);
@@ -3848,6 +3922,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     }
 
     reg->context = new ggml_hexagon_registry(reg);
+    return true;
 }
 
 static const struct ggml_backend_reg_i ggml_backend_hexagon_reg_i = {
@@ -3859,6 +3934,7 @@ static const struct ggml_backend_reg_i ggml_backend_hexagon_reg_i = {
 
 ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
     static bool initialized = false;
+    static bool available   = false;
 
     static ggml_backend_reg reg = { /* .api_version = */ GGML_BACKEND_API_VERSION,
                                     /* .iface       = */ ggml_backend_hexagon_reg_i,
@@ -3868,18 +3944,23 @@ ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
         static std::mutex           mutex;
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
+            initialized = true;
+
             auto nErr = htpdrv_init();
             if (nErr != AEE_SUCCESS) {
+                opt_ndev = 0;
                 return NULL;
             }
 
-            ggml_hexagon_init(&reg);
+            available = ggml_hexagon_init(&reg);
+            if (!available) {
+                opt_ndev = 0;
+                return NULL;
+            }
         }
-
-        initialized = true;
     }
 
-    return &reg;
+    return available ? &reg : NULL;
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
