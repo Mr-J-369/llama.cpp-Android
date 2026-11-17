@@ -48,6 +48,13 @@ static inline float e8m0_to_fp32(uchar x) {
 #define N_R0_MXFP4 2
 #define N_SG_MXFP4 2
 #define N_SIMDWIDTH 64
+#else
+#ifndef GGML_OPENCL_SUBGROUP_SIZE
+#define GGML_OPENCL_SUBGROUP_SIZE 32
+#endif
+#define N_R0_MXFP4 2
+#define N_SG_MXFP4 2
+#define N_SIMDWIDTH GGML_OPENCL_SUBGROUP_SIZE
 #endif
 
 inline void mul_mv_mxfp4_f32(
@@ -89,7 +96,9 @@ inline void mul_mv_mxfp4_f32(
     const short ix = get_sub_group_local_id()/2;  // 0...15
     const short it = get_sub_group_local_id()%2;  // 0 or 1
 
-    shmem_f32[get_sub_group_local_id()] = kvalues_mxfp4_f[get_sub_group_local_id()%16];
+    for (int i = get_sub_group_local_id(); i < 16; i += N_SIMDWIDTH) {
+        shmem_f32[i] = kvalues_mxfp4_f[i];
+    }
     barrier(CLK_LOCAL_MEM_FENCE);
 
     float4 yl[4];

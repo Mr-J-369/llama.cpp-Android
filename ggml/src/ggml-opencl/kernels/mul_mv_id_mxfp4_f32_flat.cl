@@ -63,6 +63,13 @@ static inline float e8m0_to_fp32(uchar x) {
 #define N_SG_MXFP4 1
 #define N_SIMDWIDTH 64
 #define SRC0Q_IMG
+#else
+#ifndef GGML_OPENCL_SUBGROUP_SIZE
+#define GGML_OPENCL_SUBGROUP_SIZE 32
+#endif
+#define N_R0_MXFP4 2
+#define N_SG_MXFP4 2
+#define N_SIMDWIDTH GGML_OPENCL_SUBGROUP_SIZE
 #endif
 
 kernel void kernel_mul_mv_id_mxfp4_f32_flat(

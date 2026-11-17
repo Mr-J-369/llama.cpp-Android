@@ -41,6 +41,13 @@ typedef struct {
 #define N_DST       4
 #define N_SIMDGROUP 1
 #define N_SIMDWIDTH 64
+#else
+#ifndef GGML_OPENCL_SUBGROUP_SIZE
+#define GGML_OPENCL_SUBGROUP_SIZE 32
+#endif
+#define N_DST       4
+#define N_SIMDGROUP 1
+#define N_SIMDWIDTH GGML_OPENCL_SUBGROUP_SIZE
 #endif
 
 #define BLOCK_STRIDE (N_SIMDWIDTH/8)

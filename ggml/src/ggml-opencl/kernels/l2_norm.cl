@@ -59,6 +59,7 @@ kernel void kernel_l2_norm_f32(
        if (get_local_id(0) < i) {
            sum[get_local_id(0)] += sum[get_local_id(0) + i];
        }
+       barrier(CLK_LOCAL_MEM_FENCE);
     }
 
     barrier(CLK_LOCAL_MEM_FENCE);

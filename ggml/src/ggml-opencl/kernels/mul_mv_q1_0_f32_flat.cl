@@ -32,6 +32,13 @@
 #define N_R0_Q1_0 4
 #define N_SG_Q1_0 2
 #define N_SIMDWIDTH 64
+#else
+#ifndef GGML_OPENCL_SUBGROUP_SIZE
+#define GGML_OPENCL_SUBGROUP_SIZE 32
+#endif
+#define N_R0_Q1_0 4
+#define N_SG_Q1_0 2
+#define N_SIMDWIDTH GGML_OPENCL_SUBGROUP_SIZE
 #endif
 
 #ifdef INTEL_GPU

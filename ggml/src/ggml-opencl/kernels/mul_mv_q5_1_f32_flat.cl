@@ -93,6 +93,13 @@ inline float block_q5_1_dot_y_flat(
 #define N_DST 4
 #define N_SIMDGROUP 1
 #define N_SIMDWIDTH 64
+#else
+#ifndef GGML_OPENCL_SUBGROUP_SIZE
+#define GGML_OPENCL_SUBGROUP_SIZE 32
+#endif
+#define N_DST 4
+#define N_SIMDGROUP 1
+#define N_SIMDWIDTH GGML_OPENCL_SUBGROUP_SIZE
 #endif
 
 inline void mul_vec_q_n_f32_flat(

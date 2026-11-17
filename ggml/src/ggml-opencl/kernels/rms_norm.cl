@@ -70,6 +70,7 @@ kernel void kernel_rms_norm(
        if (get_local_id(0) < i) {
            sum[get_local_id(0)] += sum[get_local_id(0) + i];
        }
+       barrier(CLK_LOCAL_MEM_FENCE);
     }
     if (get_local_id(0) == 0) {
         for (int i = 4 * (ne00 / 4); i < ne00; i++) {
